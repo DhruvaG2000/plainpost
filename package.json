@@ -1,0 +1,24 @@
+{
+  "name": "plainpost",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A plain-text, keyboard-driven Gmail client for Linux mailing lists.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "node --watch server/index.mjs",
+    "config:init": "node scripts/init-mail.mjs",
+    "test": "node --test",
+    "test:smoke": "node scripts/smoke.mjs",
+    "check:lore": "node scripts/check-lore.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "imapflow": "^2.2.6",
+    "mailparser": "^3.9.36",
+    "nodemailer": "^10.0.15"
+  }
+}

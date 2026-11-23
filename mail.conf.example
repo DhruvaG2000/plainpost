@@ -1,0 +1,11 @@
+# Mutt-style Gmail settings. Store at ~/.config/plainpost/mail.conf (chmod 600).
+# Use a Google APP PASSWORD, not your Google account password.
+set imap_user = "you@gmail.com"
+set folder = "imaps://imap.gmail.com/"
+set imap_pass = "your-app-password"
+set smtp_url = "smtps://smtp.gmail.com:465/"
+set smtp_pass = $imap_pass
+set from = $imap_user
+# Or remove both password settings above and use a private file:
+# set imap_pass_file = "~/.config/plainpost/gmail-app-password"
+# SMTP then uses the same password file automatically.
