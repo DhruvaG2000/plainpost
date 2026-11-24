@@ -38,13 +38,16 @@ function signMessage(program, raw) {
 
 export async function sendViaB4Relay(config, raw, fetcher) {
   // Match b4's web submission format, including LF line endings before signing.
-  const signed = await signMessage(config.patatt, raw.replaceAll('\r\n', '\n'));
+  const signed = [];
+  for (const message of Array.isArray(raw) ? raw : [raw]) {
+    signed.push(await signMessage(config.patatt, message.replaceAll('\r\n', '\n')));
+  }
   let response, result;
   try {
     response = await fetcher(config.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'receive', messages: [signed] }),
+      body: JSON.stringify({ action: 'receive', messages: signed }),
       redirect: 'error',
       signal: AbortSignal.timeout(30000)
     });

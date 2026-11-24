@@ -1,18 +1,16 @@
+import { mountPatchSeries } from './patch-series.js';
+import { mountComposer } from './editor.js';
+import { archiveUrl, isLoreMessageUrl, restoreLists, sameArchive } from './lists.js';
 import { extractPatch, replyFields, insertSignoff } from './compose.js';
 import { threadTree } from './threading.js';
 
 const $ = selector => document.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 const folderQueries = { inbox: 'in:inbox', starred: 'is:starred', sent: 'in:sent', all: '-in:trash', trash: 'in:trash' };
-const defaults = [
-  { name: 'linux-kernel', address: 'linux-kernel.vger.kernel.org' },
-  { name: 'linux-mm', address: 'linux-mm.kvack.org' },
-  { name: 'linux-fsdevel', address: 'linux-fsdevel.vger.kernel.org' },
-  { name: 'netdev', address: 'netdev.vger.kernel.org' },
-  { name: 'linux-btrfs', address: 'linux-btrfs.vger.kernel.org' }
-];
-let lists = defaults;
-try { const saved = JSON.parse(localStorage.getItem('plainpost-lists')); if (Array.isArray(saved) && saved.every(v => typeof v?.name === 'string' && typeof v?.address === 'string')) lists = saved; } catch { /* defaults */ }
+let savedLists;
+try { savedLists = JSON.parse(localStorage.getItem('plainpost-lists')); } catch { /* defaults */ }
+const lists = restoreLists(savedLists);
+let editingList = null;
 const state = { status: {}, folder: 'inbox', list: null, query: '', unread: false, threads: [], selectedId: null, thread: null, activeMessageId: null, flat: false, page: 0, pageTokens: [''], nextPage: '', loading: false, listVersion: 0, threadVersion: 0, compose: null, composeBusy: false, sendKey: null, reviewedMessage: null };
 let toastTimer;
 
@@ -50,7 +48,8 @@ async function refreshStatus() {
   state.status = await api('/api/status');
   const demo = state.status.provider === 'demo';
   const relay = usingRelay();
-  for (const id of ['#folders', '#list-navigation', '#search-form', '#compose-bcc-field', '#save-draft']) $(id).hidden = relay;
+  for (const id of ['#folders', '#search-form', '#compose-bcc-field', '#save-draft']) $(id).hidden = relay;
+  renderLists();
   $('#mailbox-index').hidden = relay || state.thread?.source === 'lore';
   $('#compose-bcc').disabled = relay;
   $('#b4-connect').disabled = !state.status.b4Relay || relay;
@@ -118,7 +117,28 @@ async function openDemo() {
   await refreshStatus(); state.folder = 'inbox'; state.list = null; state.query = ''; state.unread = false; $('#search').value = ''; await loadMailbox();
 }
 function renderLists() {
-  $('#lists').innerHTML = lists.map((list, i) => `<div class="list-item${state.list?.address === list.address ? ' active' : ''}"><span class="list-dot"></span><button class="list-filter" data-list-index="${i}" title="${escape(list.address)}">${escape(list.name)}</button><button class="remove-list" data-remove-list="${i}" aria-label="Remove ${escape(list.name)} filter">×</button></div>`).join('');
+  $('#lists').innerHTML = lists.map((list, i) => {
+    const name = escape(list.name);
+    const link = list.url
+      ? `<a href="${escape(list.url)}" target="_blank" rel="noopener noreferrer">${name}</a>`
+      : `<button type="button" data-edit-list="${i}" title="Add an archive URL for ${name}">${name}</button>`;
+    const filter = state.status.connected && !usingRelay() && list.address
+      ? `<button type="button" class="list-filter" data-list-index="${i}" aria-pressed="${state.list === list}" aria-label="Filter mailbox by ${name}">mail</button>` : '';
+    return `<div class="list-item">${link}${filter}<button type="button" class="remove-list" data-remove-list="${i}" aria-label="Remove ${name}">×</button></div>`;
+  }).join('');
+}
+function editList(list = null) {
+  editingList = list;
+  $('#list-title').textContent = list ? 'Edit mailing list' : 'Add mailing list';
+  $('#list-name').value = list?.name || '';
+  $('#list-url').value = list?.url || '';
+  $('#list-address').value = list?.address || '';
+  $('#list-error').textContent = '';
+  modal('#list-dialog');
+}
+function saveLists() {
+  localStorage.setItem('plainpost-lists', JSON.stringify(lists));
+  renderLists();
 }
 function updateView() {
   const name = state.query ? 'Search results' : state.list?.name || (state.folder === 'all' ? 'All mail' : state.folder[0].toUpperCase() + state.folder.slice(1));
@@ -197,10 +217,21 @@ function renderReaderEmpty(title, detail) {
   $('#workspace').classList.remove('reader-open');
   $('#reader').innerHTML = `<div class="list-empty"><span class="empty-glyph">&gt;_</span><strong>${escape(title)}</strong><p>${escape(detail)}</p></div>`;
 }
+function linkLore(line) {
+  let html = '', end = 0;
+  for (const match of line.matchAll(/https:\/\/lore\.kernel\.org\/[^\s<>"']+/g)) {
+    const url = match[0].replace(/[).,;!?]+$/, '');
+    if (!isLoreMessageUrl(url)) continue;
+    const href = `/?lore=${encodeURIComponent(url)}`;
+    html += escape(line.slice(end, match.index)) + `<a href="${escape(href)}">${escape(url)}</a>`;
+    end = match.index + url.length;
+  }
+  return html + escape(line.slice(end));
+}
 function styledBody(body) {
   return body.replace(/\r\n|\r/g, '\n').split('\n').map(line => {
     const cls = /^diff --git|^index |^@@|^--- |^\+\+\+ /.test(line) ? 'diff-meta' : /^\+/.test(line) ? 'diff-add' : /^-/.test(line) && line !== '-- ' ? 'diff-remove' : /^>/.test(line) ? 'quote' : /^(Signed-off-by|Reviewed-by|Acked-by|Tested-by|Fixes|Cc):/.test(line) ? 'trailer' : '';
-    return `<span class="${cls}">${escape(line) || '\u200b'}</span>`;
+    return `<span class="${cls}">${linkLore(line) || '\u200b'}</span>`;
   }).join('');
 }
 function archivePath(thread) { return thread.source === 'lore' ? `/api/lore/threads/${encodeURIComponent(thread.id)}` : `/api/threads/${encodeURIComponent(thread.id)}`; }
@@ -262,12 +293,29 @@ function downloadText(name, text) {
   const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+const patchSeries = mountPatchSeries({ api, styledBody, escape });
+on('#patch-series-button', 'click', () => {
+  if (usingRelay()) patchSeries.open();
+  else modal('#settings-dialog');
+});
+
+const composeEditor = mountComposer($('#compose-body'), {
+  change: updateComposeStats,
+  review: () => reviewSend(),
+  highlight: $('#compose-highlight'),
+  vim: $('#compose-vim'),
+  vimStatus: $('#vim-status')
+});
+function focusBodyEnd() {
+  composeEditor.setCursor(composeEditor.lastLine(), Infinity);
+  composeEditor.focus();
+}
 function draftStorageKey() { return `plainpost-draft:${state.status.provider}:${state.status.email}`; }
 function readComposer() {
-  return { ...state.compose, to: $('#compose-to').value, cc: $('#compose-cc').value, bcc: $('#compose-bcc').value, subject: $('#compose-subject').value, body: $('#compose-body').value };
+  return { ...state.compose, to: $('#compose-to').value, cc: $('#compose-cc').value, bcc: $('#compose-bcc').value, subject: $('#compose-subject').value, body: composeEditor.getValue() };
 }
 function updateComposeStats() {
-  const body = $('#compose-body').value, bytes = new TextEncoder().encode(body).length;
+  const body = composeEditor.getValue(), bytes = new TextEncoder().encode(body).length;
   const long = body.split('\n').some(line => new TextEncoder().encode(line).length > 998);
   $('#compose-stats').textContent = `${body.split('\n').length} lines · ${bytes.toLocaleString()} bytes${long ? ' · line > 998 bytes' : ''}`;
   $('#draft-status').textContent = state.compose?.draftId ? 'Edited · save to sync' : 'Draft kept in this tab';
@@ -284,13 +332,16 @@ function openComposer(initial) {
   // Gmail draft IDs and message IDs are distinct.
   if (initial?.id && !initial.draftId) state.compose.draftId = initial.id;
   state.sendKey = null;
-  for (const field of ['to', 'cc', 'bcc', 'subject', 'body']) $(`#compose-${field}`).value = state.compose[field] || '';
+  for (const field of ['to', 'cc', 'bcc', 'subject']) $(`#compose-${field}`).value = state.compose[field] || '';
+  composeEditor.setValue(state.compose.body || '');
+  composeEditor.clearHistory();
   $('#compose-from').textContent = state.status.from || state.status.email;
   $('#compose-title').textContent = state.compose.inReplyTo ? 'Inline reply' : state.compose.draftId ? 'Edit draft' : 'New message';
   updateComposeStats();
   $('#draft-status').textContent = state.compose.draftId ? (state.status.provider === 'demo' ? 'Saved in demo' : 'Saved in Gmail') : restore ? 'Restored from this tab' : 'Unsaved draft';
   modal('#compose-dialog');
-  if (state.compose.body) { $('#compose-body').focus(); $('#compose-body').setSelectionRange(state.compose.body.length, state.compose.body.length); }
+  composeEditor.refresh();
+  if (state.compose.body) focusBodyEnd();
   else $('#compose-to').focus();
 }
 function reply(id, all = false) {
@@ -302,12 +353,20 @@ function reply(id, all = false) {
 function composeBusy(busy) {
   state.composeBusy = busy;
   for (const selector of ['#save-draft', '#review-send', '#discard-draft', '#close-compose', '#confirm-send']) $(selector).disabled = busy;
-  for (const element of document.querySelectorAll('#compose-form input, #compose-form textarea, .compose-tools button, #send-dialog [data-close]')) element.disabled = busy;
+  for (const element of document.querySelectorAll('#compose-form input, #compose-form select, .compose-tools button, #send-dialog [data-close]')) element.disabled = busy;
+  composeEditor.setOption('readOnly', busy);
   $('#compose-bcc').disabled = busy || usingRelay();
+}
+function composerValid() {
+  if (!$('#compose-form').reportValidity()) return false;
+  if (composeEditor.getValue()) return true;
+  toast('Enter a message body.', true);
+  composeEditor.focus();
+  return false;
 }
 async function saveDraft() {
   if (state.composeBusy || usingRelay()) return;
-  if (!$('#compose-form').reportValidity()) return;
+  if (!composerValid()) return;
   composeBusy(true);
   try {
     const input = readComposer(), result = await api('/api/drafts', { method: 'POST', body: JSON.stringify(input) });
@@ -319,7 +378,7 @@ async function saveDraft() {
 }
 function reviewSend(event) {
   event?.preventDefault(); if (state.composeBusy || $('#send-dialog').open) return;
-  if (!$('#compose-form').reportValidity()) return;
+  if (!composerValid()) return;
   const input = readComposer();
   state.sendKey ||= crypto.randomUUID();
   state.reviewedMessage = { ...input, sendKey: state.sendKey };
@@ -362,17 +421,40 @@ on('#folders', 'click', async event => {
   state.folder = folder.dataset.folder; state.list = null; state.query = ''; state.unread = false; $('#search').value = ''; $('#workspace').classList.remove('reader-open'); await loadMailbox();
 });
 on('#lists', 'click', async event => {
+  const edit = event.target.closest('[data-edit-list]');
+  if (edit) { editList(lists[Number(edit.dataset.editList)]); return; }
   const remove = event.target.closest('[data-remove-list]');
-  if (remove) { const [removed] = lists.splice(Number(remove.dataset.removeList), 1); localStorage.setItem('plainpost-lists', JSON.stringify(lists)); if (state.list?.address === removed.address) { state.list = null; if (state.status.connected) await loadMailbox(); } renderLists(); return; }
-  const button = event.target.closest('[data-list-index]'); if (!button || !requireConnection()) return;
+  if (remove) {
+    const [removed] = lists.splice(Number(remove.dataset.removeList), 1);
+    const active = state.list === removed;
+    if (active) state.list = null;
+    saveLists();
+    if (active && state.status.connected && !usingRelay() && state.thread?.source !== 'lore') await loadMailbox();
+    return;
+  }
+  const button = event.target.closest('[data-list-index]');
+  if (!button || !requireConnection()) return;
   state.list = lists[Number(button.dataset.listIndex)]; state.folder = 'inbox'; state.query = ''; $('#search').value = ''; $('#workspace').classList.remove('reader-open'); await loadMailbox();
 });
-on('#add-list', 'click', () => modal('#list-dialog'));
+on('#add-list', 'click', () => editList());
 on('#list-form', 'submit', event => {
-  event.preventDefault(); const name = $('#list-name').value.trim(), address = $('#list-address').value.trim();
-  if (!/^[a-zA-Z0-9@._+-]+$/.test(address)) throw new Error('Use a List-ID or email address without spaces or Gmail query operators.');
-  if (lists.some(l => l.address === address)) throw new Error('This list filter already exists.');
-  lists.push({ name, address }); localStorage.setItem('plainpost-lists', JSON.stringify(lists)); renderLists(); $('#list-dialog').close(); $('#list-form').reset(); toast('Mailing list filter added.');
+  event.preventDefault();
+  const name = $('#list-name').value.trim(), url = archiveUrl($('#list-url').value), address = $('#list-address').value.trim();
+  const error = $('#list-error');
+  if (!name) { error.textContent = 'Enter a mailing-list name.'; return; }
+  if (!url) { error.textContent = 'Enter a full HTTP or HTTPS archive URL.'; return; }
+  if (address && !/^[a-zA-Z0-9@._+-]+$/.test(address)) {
+    error.textContent = 'Use a List-ID or email address without spaces or Gmail query operators.';
+    return;
+  }
+  if (lists.some(list => list !== editingList && (list.name.toLowerCase() === name.toLowerCase() || sameArchive(list.url, url) || (address && list.address.toLowerCase() === address.toLowerCase())))) {
+    error.textContent = 'This mailing list is already in your shortcuts.';
+    return;
+  }
+  if (editingList) Object.assign(editingList, { name, url, address });
+  else lists.push({ name, url, address });
+  saveLists();
+  $('#list-dialog').close();
 });
 on('#search-form', 'submit', async event => { event.preventDefault(); state.query = $('#search').value.trim(); await loadMailbox(); });
 on('#search', 'input', () => { $('#clear-search').hidden = !$('#search').value; });
@@ -392,7 +474,7 @@ on('#reader', 'click', event => {
   if (one) reply(one.dataset.replyId); if (all) reply(all.dataset.replyAllId, true);
   if (patch) { const message = state.thread.messages.find(m => m.id === patch.dataset.patchId); downloadText(message.subject.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 100) + (/^diff --git/m.test(message.body) ? '.patch' : '.txt'), message.body); }
 });
-on('#compose-form', 'input', updateComposeStats);
+on('#compose-form .compose-fields', 'input', updateComposeStats);
 on('#compose-form', 'submit', reviewSend);
 on('#save-draft', 'click', saveDraft);
 on('#close-compose', 'click', () => { if (!state.composeBusy) { updateComposeStats(); $('#compose-dialog').close(); toast('Draft kept in this browser tab. Press c to resume.'); } });
@@ -400,13 +482,12 @@ on('#compose-dialog', 'cancel', event => { if (state.composeBusy) event.preventD
 on('#send-dialog', 'cancel', event => { if (state.composeBusy) event.preventDefault(); });
 on('#discard-draft', 'click', () => { if (state.composeBusy) return; sessionStorage.removeItem(draftStorageKey()); $('#compose-dialog').close(); state.compose = null; toast(state.status.provider === 'demo' ? 'Local draft discarded. Previously saved demo drafts stay in the demo mailbox.' : usingRelay() ? 'Local draft discarded.' : 'Local draft discarded. Previously saved Gmail drafts stay in Gmail.'); });
 on('#confirm-send', 'click', sendMessage);
-on('#compose-body', 'keydown', event => {
-  if (event.key === 'Tab' && !event.shiftKey) { event.preventDefault(); const input = event.target; input.setRangeText('\t', input.selectionStart, input.selectionEnd, 'end'); updateComposeStats(); }
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); reviewSend(); }
-});
 on('#add-signoff', 'click', () => {
-  const body = $('#compose-body'), name = nameOf(state.status.email).split('@')[0];
-  body.value = insertSignoff(body.value, `Signed-off-by: ${name} <${state.status.email}>`); updateComposeStats(); body.focus(); body.setSelectionRange(body.value.length, body.value.length); toast('Edit the sign-off name to match your contribution identity.');
+  const name = nameOf(state.status.email).split('@')[0];
+  const signed = insertSignoff(composeEditor.getValue(), `Signed-off-by: ${name} <${state.status.email}>`);
+  composeEditor.replaceRange(signed, { line: 0, ch: 0 }, { line: composeEditor.lastLine(), ch: Infinity });
+  focusBodyEnd();
+  toast('Edit the sign-off name to match your contribution identity.');
 });
 on('#patch-file', 'change', async event => {
   const file = event.target.files[0]; if (!file) return;
@@ -415,10 +496,9 @@ on('#patch-file', 'change', async event => {
     const bytes = await file.arrayBuffer(); let text;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new Error('Patch files must be UTF-8 text.'); }
     if (text.includes('\0')) throw new Error('Binary files cannot be inserted into a plain-text message.');
-    const patch = extractPatch(text), body = $('#compose-body');
+    const patch = extractPatch(text);
     if (patch.subject && !$('#compose-subject').value) $('#compose-subject').value = patch.subject;
-    const start = body.selectionStart, end = body.selectionEnd;
-    body.setRangeText(patch.body, start, end, 'end'); updateComposeStats(); body.focus(); toast(`Inserted ${file.name} inline. Spacing preserved.`);
+    composeEditor.replaceSelection(patch.body, 'end'); composeEditor.focus(); toast(`Inserted ${file.name} inline. Spacing preserved.`);
   } finally { event.target.value = ''; }
 });
 on(document, 'keydown', event => {

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { AppError, buildRawMail, toMbox } from './mail.mjs';
 import { Gmail, GMAIL_SCOPE, exchangeToken, googleRequest } from './gmail.mjs';
@@ -9,9 +10,31 @@ import { DemoMailbox } from './demo.mjs';
 import { fetchLore } from './lore.mjs';
 import { loadMailConfig, publicMailConfig } from './mail-config.mjs';
 import { ImapMailbox } from './imap.mjs';
+import { buildPatchSeries, loadPatchSeries, MAX_SERIES_BYTES } from './patch-series.mjs';
 import { sendViaB4Relay } from './b4-relay.mjs';
 
 const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
+const require = createRequire(import.meta.url);
+const publicFiles = new Map([
+  ['/', ['index.html', 'text/html']],
+  ...['app', 'compose', 'editor', 'lists', 'patch-series', 'threading'].map(name => [`/${name}.js`, [name + '.js', 'text/javascript']]),
+  ['/style.css', ['style.css', 'text/css']],
+  ['/favicon.svg', ['favicon.svg', 'image/svg+xml']]
+].map(([path, [file, mime]]) => [path, [join(publicDir, file), mime]]));
+const editorFiles = {
+  'codemirror.css': 'lib/codemirror.css',
+  'codemirror.js': 'lib/codemirror.js',
+  'clike.js': 'mode/clike/clike.js',
+  'python.js': 'mode/python/python.js',
+  'dialog.css': 'addon/dialog/dialog.css',
+  'dialog.js': 'addon/dialog/dialog.js',
+  'searchcursor.js': 'addon/search/searchcursor.js',
+  'matchbrackets.js': 'addon/edit/matchbrackets.js',
+  'vim.js': 'keymap/vim.js'
+};
+for (const [name, file] of Object.entries(editorFiles)) {
+  publicFiles.set('/editor/' + name, [require.resolve('codemirror/' + file), name.endsWith('.css') ? 'text/css' : 'text/javascript']);
+}
 const hash = value => createHash('sha256').update(value).digest('hex');
 const random = () => randomBytes(32).toString('base64url');
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -20,12 +43,12 @@ const safeId = value => { if (!/^[a-zA-Z0-9_-]{1,256}$/.test(value || '')) throw
 
 export async function createApp(config, vault, { fetcher = fetch, mailConfigLoader = loadMailConfig, imapFactory = settings => new ImapMailbox(settings) } = {}) {
   const flows = new Map(), demoMailboxes = new Map(), sends = new Map();
-  const archives = new Map();
+  const archives = new Map(), patchDrafts = new Map();
   for (const [id, session] of Object.entries(vault.data.sessions)) if (session.expiresAt < Date.now() || !['gmail', 'imap', 'b4'].includes(session.provider)) delete vault.data.sessions[id];
 
   function setCookie(res, token) { res.setHeader('Set-Cookie', `plainpost_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`); }
   async function newSession(res, oldId, provider = 'anonymous', email = '') {
-    if (oldId) { delete vault.data.sessions[oldId]; demoMailboxes.delete(oldId); }
+    if (oldId) { delete vault.data.sessions[oldId]; demoMailboxes.delete(oldId); patchDrafts.delete(oldId); }
     const token = random(), id = hash(token);
     vault.data.sessions[id] = { provider, email, csrf: random(), expiresAt: Date.now() + 7 * 86400000 };
     if (provider === 'demo') demoMailboxes.set(id, new DemoMailbox());
@@ -33,10 +56,10 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
   }
   const json = (res, data, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(data)); };
   const redirect = (res, path) => { res.writeHead(303, { Location: path }); res.end(); };
-  async function body(req) {
+  async function body(req, maxBytes = 3 * 1024 * 1024) {
     if (!req.headers['content-type']?.startsWith('application/json')) throw new AppError('Expected JSON.', 415);
     const chunks = []; let size = 0;
-    for await (const chunk of req) { size += chunk.length; if (size > 3 * 1024 * 1024) throw new AppError('Request too large.', 413); chunks.push(chunk); }
+    for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new AppError('Request too large.', 413); chunks.push(chunk); }
     try { const value = JSON.parse(Buffer.concat(chunks).toString()); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); return value; }
     catch { throw new AppError('Invalid JSON.'); }
   }
@@ -151,6 +174,46 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
         } else if (session.provider === 'b4') {
           const relay = config.b4Relay;
           if (relay?.email !== session.email) throw new AppError('Relay settings changed. Connect b4 relay again.', 401);
+          if (path.startsWith('/api/patch-series/') && req.method === 'POST') {
+            for (const [key, entry] of patchDrafts) if (entry.expiresAt < Date.now() && !entry.sending) patchDrafts.delete(key);
+            const draft = patchDrafts.get(sessionId);
+            if (path === '/api/patch-series/load') {
+              const input = await body(req);
+              const messages = await loadPatchSeries(input.path);
+              if (vault.data.sessions[sessionId] !== session) throw new AppError('Reconnect to b4 relay.', 401);
+              if (patchDrafts.get(sessionId)?.sending) throw new AppError('Wait for the current relay submission.', 409);
+              if (!patchDrafts.has(sessionId) && patchDrafts.size >= 8) throw new AppError('Too many patch drafts are open. Try again later.', 503);
+              const id = random();
+              patchDrafts.set(sessionId, { id, messages, expiresAt: Date.now() + 3600000 });
+              return json(res, { id, messages });
+            }
+            if (path === '/api/patch-series/preview') {
+              const input = await body(req, MAX_SERIES_BYTES * 2 + 1024 * 1024);
+              if (!draft || patchDrafts.get(sessionId) !== draft || input.id !== draft.id) {
+                throw new AppError('The patch draft expired or changed. Load the files again.', 409);
+              }
+              if (draft.attempt) throw new AppError('This draft already has a relay submission attempt. Check the result before loading it again.', 409);
+              const messages = buildPatchSeries(draft.messages, input.messages, relay.from);
+              const id = random();
+              draft.preview = { id, raw: messages.map(message => message.raw) };
+              draft.expiresAt = Date.now() + 3600000;
+              return json(res, { id, messages });
+            }
+            if (path === '/api/patch-series/send') {
+              const input = await body(req);
+              if (!draft || patchDrafts.get(sessionId) !== draft || !draft.preview || input.id !== draft.preview.id) {
+                throw new AppError('Review the current series before sending.', 409);
+              }
+              if (!draft.attempt) {
+                draft.sending = true;
+                draft.attempt = sendViaB4Relay(relay, draft.preview.raw, fetcher).finally(() => { draft.sending = false; });
+                draft.expiresAt = Date.now() + 3600000;
+              }
+              await draft.attempt;
+              return json(res, { ok: true, count: draft.preview.raw.length });
+            }
+            throw new AppError('Patch series endpoint not found.', 404);
+          }
           if (path !== '/api/send' || req.method !== 'POST') throw new AppError('b4 relay provides outgoing delivery only.', 405);
           mailbox = { from: relay.from, send: raw => sendViaB4Relay(relay, raw, fetcher) };
         } else mailbox = session.provider === 'demo' ? demoMailboxes.get(sessionId) : new Gmail(config, vault, session.email, fetcher);
@@ -209,9 +272,12 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
         throw new AppError('Endpoint not found.', 404);
       }
       if (req.method !== 'GET') throw new AppError('Method not allowed.', 405);
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/compose.js': ['compose.js', 'text/javascript'], '/threading.js': ['threading.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
-      if (!files[path]) throw new AppError('Not found.', 404);
-      const [file, mime] = files[path], content = await readFile(join(publicDir, file)); res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` }); res.end(content);
+      const asset = publicFiles.get(path);
+      if (!asset) throw new AppError('Not found.', 404);
+      const [file, mime] = asset;
+      const content = await readFile(file);
+      res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` });
+      res.end(content);
     } catch (error) {
       if (!res.headersSent) json(res, { error: error.status ? error.message : 'An internal error occurred. Check the server terminal.' }, error.status || 500);
       else res.end();

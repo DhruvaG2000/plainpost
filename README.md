@@ -17,7 +17,7 @@ npm start
 
 Open **http://localhost:4819**. Choose **Explore demo** to try fictional mailing-list conversations without credentials. Demo sends stay in memory and never contact Google or any recipient. Restarting the server resets the demo.
 
-Use `npm start`, `npm run dev`, and `npm test` to serve, develop, and test. Dependencies are ImapFlow, Nodemailer and Mailparser, pinned in the lockfile; no native compilation is required.
+Use `npm start`, `npm run dev`, and `npm test` to serve, develop, and test. The lockfile pins CodeMirror, ImapFlow, Nodemailer, and Mailparser. No native compilation is required.
 
 [Windows Chrome verification](docs/chrome-qa.md) records the tested WSL access, live lore import, demo mailbox flows, responsive layout, screenshots and remaining Gmail setup requirements.
 
@@ -80,9 +80,16 @@ The relay can send signed patches without a Gmail login or SMTP credentials in P
    # PATATT_PATH=/absolute/path/to/patatt
    ```
 
-3. Restart Plainpost and choose **settings → Use b4 relay**. Compose the patch, review the message, and confirm delivery. Public lore reading remains available and drafts are kept in the current browser tab.
+3. Restart Plainpost and choose **settings → Use b4 relay**. You can now read public lore threads and use the relay for outgoing mail.
 
-The relay provides outgoing delivery to To and Cc recipients. The standard kernel.org endpoint requires a patch and a recognized mailing-list recipient. Use a relay that accepts ordinary replies if you want to send discussion messages this way. Relay submissions may be archived publicly. [Upstream relay implementation](https://github.com/mricon/b4/blob/master/misc/send-receive.py)
+### Draft and send a patch series
+
+1. Choose **send patches**. Enter the path to a patch file, a directory of patch emails, or a mailbox produced by `git format-patch --stdout`. The path is on the Plainpost host. For a WSL server, use a Linux path such as `/home/you/linux/outgoing` or `~/linux/outgoing`.
+2. For the kernel.org relay, prepare the series with b4 and load the directory from `b4 send -o DIR`. Plainpost preserves the export's b4 tracking headers, message IDs, and threading. The endpoint requires a b4-prepared series and a recognized list in To or Cc. Other relays may accept ordinary format-patch messages or discussion replies. [b4 web submission requirements](https://b4.docs.kernel.org/en/latest/contributor/send.html)
+3. Review or edit each message's To, Cc, subject, and body. Add shared To or Cc recipients when they should receive every message. Plainpost orders numbered patches and the cover letter and checks for missing or duplicate patches.
+4. Select **Review patches** to inspect the outgoing messages, including every body, recipient, and threading header. **Keep editing** returns to the draft. **Send series through b4 relay** signs all reviewed messages and submits them together. The relay may rewrite the From header for delivery. After acceptance, **Find on lore** opens the first message's permalink.
+
+The server keeps loaded series and previews in session memory for up to an hour. Imports are limited to 100 messages and 8 MiB. Relay submissions may be archived publicly.
 
 ## Connect your Gmail account
 
@@ -130,18 +137,22 @@ To change the port, update `PORT` and `APP_URL`; if using OAuth, also update its
 ## Mailbox and kernel workflow
 
 - Inbox, starred, sent, Gmail drafts, all mail, trash, archive, unread/read, and restore.
-- Paginated conversations, a collapsible mailbox index, nested thread trees, Gmail search operators, and customizable mailing-list filters. Defaults include linux-kernel, linux-mm, linux-fsdevel, netdev, and linux-btrfs.
+- Paginated conversations, a collapsible mailbox index, nested thread trees, Gmail search operators, and optional mailbox filters for mailing lists with a List-ID.
 - Reply and reply-all preserve `In-Reply-To`, `References`, subject, and Gmail thread identity. Replies quote the original text and start your cursor below it for inline or bottom-posted responses.
 - Plain-text composer with To, Cc, Bcc, a recipient/body review before sending, and Gmail draft creation and updating. A saved draft is consumed when sent.
 - Insert a UTF-8 `.patch`, `.diff`, `.txt`, or unencoded `.eml` inline. A single `git format-patch` message has its envelope and headers removed, its subject imported when the composer subject is empty, and its patch body preserved.
 - Insert a `Signed-off-by` trailer using your connected email. For format-patch content it is inserted above the separator and diff. Edit the name and trailer yourself before sending; adding a trailer is your certification.
 - Download each original `.eml`, displayed text/patch, a thread as mbox, or existing message attachments. Plainpost does not create outgoing attachments.
 
-Subscribe to lists separately so their messages arrive in Gmail. The **lists** navigation runs Gmail `list:` searches. Use the separate lore URL field for public archive threads. Folder and list links wrap on narrow screens; long thread trees and patch lines scroll horizontally without rewriting their text.
+Subscribe to lists separately so their messages arrive in Gmail. Folder and list links wrap on narrow screens; long thread trees and patch lines scroll horizontally without rewriting their text.
+
+The list bar links to the linux-kernel, linux-mm, linux-fsdevel, netdev, and linux-btrfs archives. **Add list** saves a name and archive URL in your browser. Add a List-ID to also get a **mail** filter when a mailbox is connected. Lore message links in email bodies open the referenced thread in Plainpost.
+
+Enable **Vim keys** in the composer for Normal, Insert, and Visual mode editing. The setting is saved in your browser. **Auto** highlighting colors quoted and unquoted diffs, recognizes C and Python in patches by filename, and highlights fenced C or Python snippets. Select **C** or **Python** to highlight unmarked code.
 
 Tabs, trailing spaces, and blank lines are retained. The editor disables automatic wrapping; sending normalizes line endings to CRLF and supplies a final newline. It never uses HTML or `format=flowed`. The server rejects a body line over **998 UTF-8 bytes**, and bodies over **2 MiB**, rather than silently changing a patch. For Linux kernel submissions, manually wrap the patch explanation at 75 columns and keep trailers such as `Fixes:` on one line. Leave diff lines intact. The 998-byte limit applies to every body line and is checked separately from the kernel's prose guidance. Compare with the kernel's [email client guidance](https://docs.kernel.org/process/email-clients.html) and [patch submission guide](https://docs.kernel.org/process/submitting-patches.html).
 
-Incoming multipart messages display their `text/plain` parts only. HTML-only mail shows a notice with an original-message download; HTML is neither rendered nor converted. Drafts with HTML-only bodies or attachments are blocked from editing to avoid losing their content. Patch import accepts one UTF-8 patch message at a time; send a series as separate messages after checking its subjects and recipients. This Gmail-specific client does not replace all `git send-email` series-management options.
+Incoming multipart messages display their `text/plain` parts only. HTML-only mail shows a notice with an original-message download; HTML is neither rendered nor converted. Drafts with HTML-only bodies or attachments are blocked from editing to avoid losing their content. Use **Insert patch** for a single inline patch in the regular composer. Use **send patches** for a series through b4 relay.
 
 Before sending in the web interface, select **Review & send**. The dialog shows the recipients, subject and full body with horizontal scrolling for long lines. Select **Send message** to send the reviewed content, or **Keep editing** to return to the composer. To check live delivery, send a test patch to yourself, download the received raw message, and apply it with `git am` on a branch at the expected base.
 
@@ -195,6 +206,7 @@ server/app.mjs      HTTP routes, OAuth, sessions, and request protection
 server/gmail.mjs    Gmail API and token refresh
 server/imap.mjs     Gmail IMAP and plain RFC822 SMTP delivery
 server/b4-relay.mjs patatt signing and b4 web submission
+server/patch-series.mjs  Local patch import and series preview
 server/mail-config.mjs  Static Mutt-style home settings
 server/mail.mjs     Plain MIME construction and mailbox export
 server/lore.mjs     Bounded lore downloads and mbox/MIME decoding

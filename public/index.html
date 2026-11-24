@@ -7,18 +7,27 @@
   <meta name="description" content="A plain-text, keyboard-driven local mail client for Linux kernel mailing lists.">
   <title>Plainpost — kernel mail & archives</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/editor/codemirror.css">
+  <link rel="stylesheet" href="/editor/dialog.css">
   <link rel="stylesheet" href="/style.css">
+  <script defer src="/editor/codemirror.js"></script>
+  <script defer src="/editor/clike.js"></script>
+  <script defer src="/editor/python.js"></script>
+  <script defer src="/editor/dialog.js"></script>
+  <script defer src="/editor/searchcursor.js"></script>
+  <script defer src="/editor/matchbrackets.js"></script>
+  <script defer src="/editor/vim.js"></script>
   <script type="module" src="/app.js"></script>
 </head>
 <body>
   <div class="shell">
     <header class="site-header">
       <a class="brand" href="/">plainpost</a><span> / kernel mail &amp; archives / <strong>text/plain</strong></span>
-      <nav class="account-links"><button id="compose-button" disabled>compose</button><button id="connect-button">Connect Gmail</button><button id="settings-button" aria-label="Connection settings">settings</button><button id="help-button" aria-label="Keyboard shortcuts">help</button></nav>
+      <nav class="account-links"><button id="compose-button" disabled>compose</button><button id="patch-series-button">send patches</button><button id="connect-button">Connect Gmail</button><button id="settings-button" aria-label="Connection settings">settings</button><button id="help-button" aria-label="Keyboard shortcuts">help</button></nav>
       <div class="account"><span id="avatar" hidden>@</span><strong id="account-name">Local mailbox</strong> <span id="account-email">Gmail ready</span> · localhost</div>
     </header>
     <nav id="folders" aria-label="Mailbox navigation"><button data-folder="inbox" class="active">inbox</button> | <button data-folder="starred">starred</button> | <button data-folder="sent">sent</button> | <button data-folder="drafts">drafts</button> | <button data-folder="all">all mail</button> | <button data-folder="trash">trash</button></nav>
-    <div class="list-navigation" id="list-navigation"><span>lists: </span><nav id="lists" aria-label="Mailing list filters"></nav><button id="add-list" aria-label="Add a mailing list">[+ add]</button></div>
+    <div class="list-navigation" id="list-navigation"><span>lists: </span><nav id="lists" aria-label="Mailing list archives"></nav><button id="add-list" aria-label="Add a mailing list">[+ add list]</button></div>
     <div class="search-tools">
       <form id="lore-form"><label for="lore-url">lore thread:</label><input id="lore-url" type="url" required placeholder="https://lore.kernel.org/all/message-id/" aria-label="Lore thread URL"><button id="fetch-lore" type="submit">Fetch thread</button></form>
       <form id="search-form" role="search"><label for="search">Gmail search:</label><input id="search" aria-label="Search Gmail" placeholder="list:linux-kernel.vger.kernel.org" autocomplete="off"><button type="submit">Search</button><button type="button" id="clear-search" aria-label="Clear search" hidden>clear</button></form>
@@ -50,16 +59,59 @@
     <details class="setup-block"><summary>Optional: Google OAuth</summary><p>For accounts that cannot use app passwords, the existing OAuth option is still available. Enable Gmail API in Google Cloud, create a Web application OAuth client, register <code id="redirect-uri">http://localhost:4819/auth/callback</code>, and set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env. Restart after changing .env.</p><button id="oauth-connect" disabled>Sign in with Google</button></details>
     <div class="dialog-actions"><button id="disconnect-button" class="danger-button" hidden>Disconnect account</button><button id="settings-demo" class="secondary-button">Open demo</button><button id="settings-connect" class="primary-button">Reload config &amp; connect</button></div>
   </dialog>
-  <dialog id="help-dialog" class="help-dialog"><div class="dialog-heading"><div><div class="eyebrow">KEEP YOUR HANDS ON THE KEYS</div><h2>A little muscle memory.</h2></div><button data-close="help-dialog" aria-label="Close shortcuts">×</button></div><div class="shortcuts"><div><kbd>j</kbd> / <kbd>k</kbd><span>Next / previous thread</span></div><div><kbd>Enter</kbd><span>Open selected thread</span></div><div><kbd>[</kbd> / <kbd>]</kbd><span>Previous / next message in thread</span></div><div><kbd>c</kbd><span>Compose a message</span></div><div><kbd>r</kbd> / <kbd>R</kbd><span>Reply / reply to all to selected message</span></div><div><kbd>a</kbd><span>Archive thread</span></div><div><kbd>d</kbd><span>Move thread to trash</span></div><div><kbd>s</kbd><span>Star / unstar thread</span></div><div><kbd>u</kbd><span>Mark thread unread</span></div><div><kbd>/</kbd><span>Focus Gmail search</span></div><div><kbd>?</kbd><span>Show this guide</span></div><div><kbd>Esc</kbd><span>Close dialog or clear search</span></div><div><kbd>Ctrl</kbd> + <kbd>Enter</kbd><span>Review a composed message</span></div><div><kbd>Tab</kbd><span>Insert a tab in the message body</span></div></div><p class="muted">Single-key shortcuts pause while you’re typing. Replies quote the original above your cursor, ready for inline or bottom-posted responses.</p></dialog>
-  <dialog id="list-dialog" class="list-dialog"><form id="list-form"><div class="dialog-heading"><div><div class="eyebrow">FOLLOW THE CONVERSATION</div><h2>Add a list filter</h2></div><button type="button" data-close="list-dialog" aria-label="Close list filter">×</button></div><label>Display name<input id="list-name" required maxlength="40" placeholder="linux-arm-kernel"></label><label>List-ID or list address<input id="list-address" required maxlength="180" placeholder="linux-arm-kernel.lists.infradead.org"></label><p class="muted">This filters mail already delivered to Gmail. Subscribe to the mailing list separately to receive its messages.</p><div class="dialog-actions"><button class="primary-button" type="submit">Add filter</button></div></form></dialog>
+  <dialog id="help-dialog" class="help-dialog"><div class="dialog-heading"><div><div class="eyebrow">KEEP YOUR HANDS ON THE KEYS</div><h2>A little muscle memory.</h2></div><button data-close="help-dialog" aria-label="Close shortcuts">×</button></div><div class="shortcuts"><div><kbd>j</kbd> / <kbd>k</kbd><span>Next / previous thread</span></div><div><kbd>Enter</kbd><span>Open selected thread</span></div><div><kbd>[</kbd> / <kbd>]</kbd><span>Previous / next message in thread</span></div><div><kbd>c</kbd><span>Compose a message</span></div><div><kbd>r</kbd> / <kbd>R</kbd><span>Reply / reply to all to selected message</span></div><div><kbd>a</kbd><span>Archive thread</span></div><div><kbd>d</kbd><span>Move thread to trash</span></div><div><kbd>s</kbd><span>Star / unstar thread</span></div><div><kbd>u</kbd><span>Mark thread unread</span></div><div><kbd>/</kbd><span>Focus Gmail search</span></div><div><kbd>?</kbd><span>Show this guide</span></div><div><kbd>Esc</kbd><span>Leave Vim insert mode, close dialog, or clear search</span></div><div><kbd>Ctrl</kbd> + <kbd>Enter</kbd><span>Review a composed message</span></div><div><kbd>Tab</kbd><span>Insert a tab in the message body</span></div></div><p class="muted">Single-key shortcuts pause while you’re typing. Replies quote the original above your cursor, ready for inline or bottom-posted responses.</p></dialog>
+  <dialog id="list-dialog" class="list-dialog">
+    <form id="list-form">
+      <div class="dialog-heading"><h2 id="list-title">Add mailing list</h2><button type="button" data-close="list-dialog" aria-label="Close mailing list form">×</button></div>
+      <label>List name<input id="list-name" required maxlength="40" placeholder="linux-arm-kernel"></label>
+      <label>Archive URL<input id="list-url" type="url" required maxlength="2048" placeholder="https://lore.kernel.org/linux-arm-kernel/"></label>
+      <label>List-ID or email address (optional, for mailbox filtering)<input id="list-address" maxlength="180" placeholder="linux-arm-kernel.lists.infradead.org"></label>
+      <p id="list-error" class="series-status error" role="alert"></p>
+      <div class="dialog-actions"><button class="primary-button" type="submit">Save list</button></div>
+    </form>
+  </dialog>
   <dialog id="compose-dialog" class="compose-dialog">
     <form id="compose-form">
       <div class="composer-heading"><div><span class="tiny-led"></span><strong id="compose-title">New message</strong><span class="composer-format">text/plain</span></div><button id="close-compose" type="button" aria-label="Close composer">×</button></div>
       <div class="compose-fields"><div class="from-field"><span>From</span><strong id="compose-from"></strong></div><label>To<input name="to" id="compose-to" required autocomplete="off" placeholder="linux-kernel@vger.kernel.org"></label><label>Cc<input name="cc" id="compose-cc" autocomplete="off" placeholder="maintainers, reviewers"></label><label id="compose-bcc-field">Bcc<input name="bcc" id="compose-bcc" autocomplete="off" placeholder="optional"></label><label>Subject<input name="subject" id="compose-subject" required placeholder="[PATCH v1] subsystem: describe your change"></label></div>
-      <div class="compose-tools"><label class="file-button">↥ Insert patch<input type="file" id="patch-file" accept=".patch,.diff,.txt,.eml,text/plain" hidden></label><button type="button" id="add-signoff">＋ Signed-off-by</button><span>UTF-8 · no wrapping · tabs preserved</span></div>
+      <div class="compose-tools"><label class="file-button">↥ Insert patch<input type="file" id="patch-file" accept=".patch,.diff,.txt,.eml,text/plain" hidden></label><button type="button" id="add-signoff">＋ Signed-off-by</button><label>Highlighting <select id="compose-highlight"><option value="auto">Auto</option><option value="plain">Plain text</option><option value="diff">Diff</option><option value="c">C</option><option value="python">Python</option></select></label><label><input type="checkbox" id="compose-vim"> Vim keys</label><span id="vim-status" aria-live="polite"></span></div>
       <label class="sr-only" for="compose-body">Plain-text message body</label><textarea name="body" id="compose-body" wrap="off" spellcheck="false" required placeholder="Write a plain-text message or insert a patch…"></textarea>
       <div class="composer-bottom"><div><span id="compose-stats">0 lines · 0 bytes</span><span id="draft-status">Unsaved draft</span></div><div><button type="button" id="discard-draft" class="text-button">Discard</button><button type="button" id="save-draft" class="secondary-button">Save draft</button><button type="submit" id="review-send" class="primary-button">Review & send ↗</button></div></div>
     </form>
+  </dialog>
+  <dialog id="patch-series-dialog" class="compose-dialog" aria-labelledby="patch-series-title">
+    <div class="dialog-heading"><h2 id="patch-series-title">Draft patches for b4 relay</h2><button type="button" id="close-patch-series" aria-label="Close patch drafts">×</button></div>
+    <form id="series-load">
+      <label for="series-path">Patch file or series directory on the Plainpost host</label>
+      <div class="series-path"><input id="series-path" required autocomplete="off" placeholder="/home/you/linux/outgoing"><button type="submit">Load patches</button></div>
+      <p class="muted">For the kernel.org relay, load a directory exported by <code>b4 send -o DIR</code>.</p>
+    </form>
+    <form id="series-edit" hidden>
+      <fieldset>
+        <legend>Add recipients to every message</legend>
+        <div class="compose-fields">
+          <label>To<input id="series-to" autocomplete="off" placeholder="list@vger.kernel.org"></label>
+          <label>Cc<input id="series-cc" autocomplete="off"></label>
+        </div>
+      </fieldset>
+      <div class="compose-tools"><label>Message <select id="series-message"></select></label><span id="series-source" class="muted"></span></div>
+      <div class="compose-fields">
+        <label>To<input id="series-message-to" autocomplete="off"></label>
+        <label>Cc<input id="series-message-cc" autocomplete="off"></label>
+        <label>Subject<input id="series-message-subject" required></label>
+      </div>
+      <div class="compose-tools"><label>Highlighting <select id="series-highlight"><option value="auto">Auto</option><option value="plain">Plain text</option><option value="diff">Diff</option><option value="c">C</option><option value="python">Python</option></select></label><label><input type="checkbox" id="series-vim"> Vim keys</label><span id="series-vim-status" aria-live="polite"></span></div>
+      <label class="sr-only" for="series-body">Patch message body</label><textarea id="series-body" wrap="off" spellcheck="false"></textarea>
+      <div class="dialog-actions"><button type="submit" class="primary-button">Review patches</button></div>
+    </form>
+    <p id="series-edit-status" class="series-status" role="status"></p>
+  </dialog>
+  <dialog id="series-preview-dialog" class="compose-dialog" aria-labelledby="series-preview-title">
+    <div class="dialog-heading"><h2 id="series-preview-title">Review relay submission</h2><button type="button" id="close-series-preview" aria-label="Back to editing patches">×</button></div>
+    <p class="muted">Plainpost signs these messages after confirmation. The relay may rewrite the From header for delivery.</p>
+    <div id="series-preview"></div>
+    <p id="series-send-status" class="series-status" role="status"></p>
+    <div class="dialog-actions"><button type="button" id="back-to-patches" autofocus>Keep editing</button><button type="button" id="confirm-series" class="primary-button">Send through b4 relay</button></div>
   </dialog>
   <dialog id="send-dialog" class="send-dialog"><div class="dialog-heading"><div><div class="eyebrow">ONE LAST READ</div><h2 id="send-title">Ready to send?</h2></div><button data-close="send-dialog" aria-label="Back to editing">×</button></div><div id="send-details"></div><pre id="send-preview"></pre><p class="muted" id="send-note"></p><div class="dialog-actions"><button data-close="send-dialog" class="secondary-button" autofocus>Keep editing</button><button id="confirm-send" class="primary-button">Send message ↗</button></div></dialog>
 </body>

@@ -17,6 +17,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "codemirror": "5.65.21",
     "imapflow": "^2.2.6",
     "mailparser": "^3.9.36",
     "nodemailer": "^10.0.15"

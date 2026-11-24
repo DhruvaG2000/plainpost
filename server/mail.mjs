@@ -46,34 +46,49 @@ function encodedWord(text) {
   return words.join('\r\n ');
 }
 
-function addressHeader(value) {
-  return addresses(value).map(({ name, email }) => name ? `${/^[\x20-\x7e]*$/.test(name) ? '"' + name.replace(/["\\]/g, '\\$&') + '"' : encodedWord(name)} <${email}>` : email).join(',\r\n ');
+function addressHeader(mailboxes) {
+  return mailboxes.map(({ name, email }) => name ? `${/^[\x20-\x7e]*$/.test(name) ? '"' + name.replace(/["\\]/g, '\\$&') + '"' : encodedWord(name)} <${email}>` : email).join(',\r\n ');
 }
 
 export function messageIds(value = '') {
   return String(value).match(/<[^<>\s\x00-\x1f]+@[^<>\s\x00-\x1f]+>/g) || [];
 }
 
-export function buildRawMail(input, from, now = new Date()) {
+export function buildRawMail(input, from, now = new Date(), { messageId, extraHeaders = [], uniqueRecipients = false } = {}) {
   if (!input || typeof input !== 'object') throw new AppError('Message is required.');
   for (const field of ['to', 'cc', 'bcc', 'subject', 'body']) {
     if (input[field] !== undefined && typeof input[field] !== 'string') throw new AppError(`${field} must be text.`);
   }
-  if (!addresses(input.to || '').length) throw new AppError('Enter at least one To address.');
+  let to = addresses(input.to);
+  let cc = addresses(input.cc);
+  if (uniqueRecipients) {
+    const seen = new Set();
+    const firstOccurrence = ({ email }) => {
+      const key = email.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    };
+    to = to.filter(firstOccurrence);
+    cc = cc.filter(firstOccurrence);
+  }
+  if (!to.length) throw new AppError('Enter at least one To address.');
   const subject = input.subject || '';
   if (!subject.trim() || /[\r\n\x00-\x1f\x7f]/.test(subject) || Buffer.byteLength(subject) > 900) throw new AppError('Enter a subject without control characters (maximum 900 bytes).');
   if (typeof input.body !== 'string' || !input.body.trim()) throw new AppError('The plain-text body is empty.');
   if (Buffer.byteLength(input.body) > 2 * 1024 * 1024 || input.body.includes('\0')) throw new AppError('Message body must be valid text under 2 MiB.');
   const body = input.body.replace(/\r\n|\r|\n/g, '\r\n');
   if (body.split('\r\n').some(line => Buffer.byteLength(line) > 998)) throw new AppError('A body line exceeds 998 bytes. Shorten it manually; patches are never automatically wrapped.');
-  const fromEmail = addresses(from)[0]?.email;
+  const senders = addresses(from);
+  const fromEmail = senders[0]?.email;
   if (!fromEmail) throw new AppError('Account email is missing.');
+  if (messageId && messageIds(messageId)[0] !== messageId) throw new AppError('Invalid Message-ID.');
   const headers = [
-    `From: ${addressHeader(from)}`, `To: ${addressHeader(input.to)}`,
-    ...(input.cc ? [`Cc: ${addressHeader(input.cc)}`] : []),
-    ...(input.bcc ? [`Bcc: ${addressHeader(input.bcc)}`] : []),
+    `From: ${addressHeader(senders)}`, `To: ${addressHeader(to)}`,
+    ...(cc.length ? [`Cc: ${addressHeader(cc)}`] : []),
+    ...(input.bcc ? [`Bcc: ${addressHeader(addresses(input.bcc))}`] : []),
     `Subject: ${encodedWord(subject)}`, `Date: ${now.toUTCString()}`,
-    `Message-ID: <${randomUUID()}@${fromEmail.split('@')[1]}>`,
+    `Message-ID: ${messageId || `<${randomUUID()}@${fromEmail.split('@')[1]}>`}`,
     'MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8',
     'Content-Transfer-Encoding: 8bit', 'X-Mailer: Plainpost/1.0'
   ];
@@ -83,6 +98,17 @@ export function buildRawMail(input, from, now = new Date()) {
     headers.push(`In-Reply-To: ${parent}`);
     const refs = [...new Set([...messageIds(input.references).slice(-20), parent])];
     headers.push(`References: ${refs.join('\r\n ')}`);
+  }
+  for (const { name, value } of extraHeaders) {
+    if (!/^[A-Za-z0-9-]+$/.test(name) || !/^[\x20-\x7e]+$/.test(value)) throw new AppError('Invalid patch metadata header.');
+    let header = name + ':';
+    let column = header.length;
+    for (const word of value.trim().split(/ +/)) {
+      const separator = column + word.length + 1 > 78 ? '\r\n ' : ' ';
+      header += separator + word;
+      column = (separator.length > 1 ? 0 : column) + word.length + 1;
+    }
+    headers.push(header);
   }
   if (headers.some(h => h.split('\r\n').some(l => Buffer.byteLength(l) > 998))) throw new AppError('An email header is too long.');
   return headers.join('\r\n') + '\r\n\r\n' + body + (body.endsWith('\r\n') ? '' : '\r\n');

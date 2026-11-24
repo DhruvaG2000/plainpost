@@ -281,3 +281,65 @@ test('Gmail draft resources retain the draft ID independently from their message
   await gmail.saveDraft('plain message', draft.threadId, draft.id);
   assert.equal(calls[1].path, '/gmail/v1/users/me/drafts/draft-123'); assert.equal(calls[1].method, 'PUT');
 });
+
+test('b4 patch series previews all messages and signs the reviewed snapshot in one request', { skip: process.platform === 'win32' }, async t => {
+  const b4Relay = loadB4RelayConfig({ B4_RELAY_URL: 'https://relay.example.org/_b4_submit', B4_RELAY_FROM: 'Author <author@example.org>' });
+  const submissions = [];
+  const f = await fixture(t, { config: { b4Relay }, fetcher: async (url, options) => {
+    assert.equal(url, b4Relay.endpoint);
+    submissions.push(JSON.parse(options.body));
+    return Response.json({ result: 'success' });
+  } });
+  b4Relay.patatt = join(f.dir, 'patatt');
+  const signedHeader = 'X-Developer-Signature: test\n';
+  await writeFile(b4Relay.patatt, "#!/bin/sh\n[ \"$1\" = sign ] || exit 1\nprintf 'X-Developer-Signature: test\\n'\ncat\n", { mode: 0o700 });
+  const cover = '[PATCH v2 0/2] Cover';
+  const first = '[PATCH v2 1/2] Change C';
+  const second = '[PATCH v2 2/2] Change Python';
+  const c = 'diff --git a/a.c b/a.c\n--- a/a.c\n+++ b/a.c\n@@ -1 +1 @@\n-\treturn 1;\n+\treturn 2;  \n';
+  const python = 'diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-return 1\n+return 2\n';
+  const source = (subject, body, headers = '') => `From: Author <author@example.org>\nTo: list@example.org\nSubject: ${subject}\n${headers}\n${body}`;
+  const coverFile = join(f.dir, 'z-cover.eml');
+  await writeFile(coverFile, source(cover, 'Cover letter\n', 'Message-ID: <series@example.org>\nX-B4-Tracking: v=1; b=ZXhh\n bXBsZQ==\nX-Change-ID: 20261124-example\n'));
+  await writeFile(join(f.dir, 'y-first.patch'), source(first, c));
+  await writeFile(join(f.dir, 'x-second.eml'), source(second, python).replace('Author <author@example.org>', 'Other Author <other@example.org>'));
+  const post = (route, body) => f.request('/api/patch-series/' + route, { method: 'POST', body });
+  await f.status();
+  assert.equal((await post('load', { path: f.dir })).status, 401);
+  assert.equal((await f.request('/api/connect/b4', { method: 'POST', body: {} })).status, 200);
+  await f.status();
+  assert.equal((await post('load', { path: coverFile })).status, 400);
+  const loaded = await post('load', { path: f.dir });
+  assert.equal(loaded.status, 200);
+  const { id, messages } = await loaded.json();
+  assert.deepEqual(messages.map(message => message.subject), [cover, first, second]);
+  const edits = messages.map(({ to, cc, subject, body }) => ({ to, cc, subject, body }));
+  edits[1].to = 'list@example.org, LIST@example.org';
+  edits[1].cc = 'list@example.org, maintainer@example.org';
+  edits[0].body = 'Reviewed cover\n';
+  const stale = await (await post('preview', { id, messages: edits })).json();
+  edits[1].body += '\nEdited before final review.\n';
+  const reviewed = await (await post('preview', { id, messages: edits })).json();
+  assert.match(reviewed.messages[0].raw, /Message-ID: <series@example.org>/);
+  assert.match(reviewed.messages[0].raw, /X-B4-Tracking: v=1; b=ZXhh bXBsZQ==\nX-Change-ID: 20261124-example\n/);
+  assert.match(reviewed.messages[1].raw, /To: list@example.org\nCc: maintainer@example.org\n/);
+  assert.match(reviewed.messages[1].raw, /In-Reply-To: <series@example.org>\nReferences: <series@example.org>\n/);
+  assert.ok(reviewed.messages[1].raw.endsWith(c + '\nEdited before final review.\n'));
+  assert.ok(reviewed.messages[2].raw.endsWith('From: Other Author <other@example.org>\n\n' + python));
+  assert.equal((await post('send', { id: stale.id })).status, 409);
+  assert.deepEqual(submissions, []);
+  const result = await Promise.all([post('send', { id: reviewed.id }), post('send', { id: reviewed.id })]);
+  for (const response of result) assert.deepEqual(await response.json(), { ok: true, count: 3 });
+  assert.deepEqual(submissions, [{ action: 'receive', messages: reviewed.messages.map(message => signedHeader + message.raw) }]);
+});
+
+test('b4 patch import accepts a git format-patch stdout file', async t => {
+  const { loadPatchSeries } = await import('../server/patch-series.mjs');
+  const f = await fixture(t);
+  const path = join(f.dir, 'series.mbox');
+  const message = number => `From ${'0'.repeat(40)} Mon Sep 17 00:00:00 2001\r\nFrom: Author <author@example.org>\r\nSubject: [fixture] [PATCH ${number}/2] Update file\r\n\r\ndiff --git a/a b/a\r\n--- a/a\r\n+++ b/a\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n`;
+  await writeFile(path, message(2) + message(1));
+  assert.deepEqual((await loadPatchSeries(path)).map(item => item.sequence.number), [1, 2]);
+  await writeFile(path, message(1) + message(1));
+  await assert.rejects(loadPatchSeries(path), /missing or duplicate patch numbers/);
+});
