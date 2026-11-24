@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { once } from 'node:events';
@@ -10,6 +10,7 @@ import { Vault } from '../server/vault.mjs';
 import { createApp } from '../server/app.mjs';
 import { Gmail, GMAIL_SCOPE } from '../server/gmail.mjs';
 import { toMbox } from '../server/mail.mjs';
+import { loadB4RelayConfig } from '../server/b4-relay.mjs';
 
 async function fixture(t, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'plainpost-test-'));
@@ -41,7 +42,10 @@ test('static app loads with strict CSP, no secrets or directory traversal expose
   assert.match(await response.text(), /Plainpost/);
   for (const path of ['/data/key', '/.env', '/server/app.mjs', '/missing']) assert.equal((await f.request(path)).status, 404);
   assert.equal((await f.request('/api/threads')).status, 401);
-  assert.equal((await f.status()).configured, false);
+  const status = await f.status();
+  assert.equal(status.configured, false);
+  assert.equal(status.b4Relay, false);
+  assert.equal((await f.request('/api/connect/b4', { method: 'POST', body: {} })).status, 400);
   assert.match((await f.request('/auth/start', { redirect: 'manual' })).headers.get('location'), /setup_required/);
 });
 
@@ -65,6 +69,92 @@ test('home IMAP connection protects secrets, verifies login, tracks replacement 
   assert.equal((await f.status()).connected, false);
   assert.equal((await f.request('/api/threads')).status, 401);
 });
+test('b4 relay config requires an HTTPS endpoint and a single sender', () => {
+  assert.equal(loadB4RelayConfig({}), null);
+  const env = { B4_RELAY_URL: 'https://relay.example.org/_b4_submit', B4_RELAY_FROM: 'Patch Author <author@example.org>' };
+  assert.deepEqual(loadB4RelayConfig(env), {
+    endpoint: env.B4_RELAY_URL, from: env.B4_RELAY_FROM, email: 'author@example.org', patatt: 'patatt'
+  });
+  assert.throws(() => loadB4RelayConfig({ ...env, B4_RELAY_URL: 'http://relay.example.org' }), /HTTPS/);
+  assert.throws(() => loadB4RelayConfig({ ...env, B4_RELAY_FROM: 'a@example.org, b@example.org' }), /one verified email/);
+});
+
+test('b4 relay signs and submits reviewed plain mail without a Gmail connection', { skip: process.platform === 'win32' }, async t => {
+  const b4Relay = loadB4RelayConfig({ B4_RELAY_URL: 'https://relay.example.org/_b4_submit', B4_RELAY_FROM: 'Patch Author <author@example.org>' });
+  const archive = Buffer.from('From: Other Author <other@example.org>\nTo: list@kernel.org\nSubject: [PATCH] first version\nMessage-ID: <root@example.org>\n\nInitial message\n');
+  const submissions = [];
+  const f = await fixture(t, {
+    config: { b4Relay },
+    fetcher: async (url, options) => {
+      if (String(url).startsWith('https://lore.kernel.org/')) return new Response(gzipSync(toMbox([archive])));
+      assert.equal(url, b4Relay.endpoint);
+      assert.equal(options.method, 'POST');
+      assert.equal(options.redirect, 'error');
+      const { action, messages } = JSON.parse(options.body);
+      assert.equal(action, 'receive');
+      assert.equal(messages.length, 1);
+      submissions.push(messages[0]);
+      if (messages[0].includes('Subject: [PATCH] rejected')) {
+        return Response.json({ result: 'error', message: 'Destinations must include a recognized list.' }, { status: 500 });
+      }
+      return Response.json({ result: 'success' });
+    }
+  });
+  b4Relay.patatt = join(f.dir, 'patatt');
+  await writeFile(b4Relay.patatt, "#!/bin/sh\n[ \"$1\" = sign ] || exit 1\nprintf 'X-Developer-Signature: test\\n'\ncat\n", { mode: 0o700 });
+  const post = (path, body, headers) => f.request(path, { method: 'POST', body, headers });
+  const status = await f.status();
+  assert.equal(status.b4Relay, true);
+  assert.equal(status.configured, false);
+  assert.equal(status.connected, false);
+  assert.equal((await post('/api/send', {})).status, 401);
+  const thread = await (await post('/api/lore/import', { url: 'https://lore.kernel.org/lkml/root@example.org/' })).json();
+  assert.equal((await post('/api/connect/b4', {}, { 'X-CSRF-Token': '' })).status, 403);
+  assert.equal((await post('/api/connect/b4', {})).status, 200);
+  const connected = await f.status();
+  assert.equal(connected.provider, 'b4');
+  assert.equal(connected.email, 'author@example.org');
+  assert.equal(connected.from, 'Patch Author <author@example.org>');
+  assert.doesNotMatch(JSON.stringify(connected), /relay\.example\.org|patatt/);
+  assert.equal((await f.request('/api/lore/threads/' + thread.id + '/mbox')).status, 200);
+  assert.equal((await f.request('/api/threads')).status, 405);
+  assert.equal((await post('/api/drafts', {})).status, 405);
+
+  const body = 'Café fixes spacing.\n\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+\tnew  \n';
+  const message = {
+    to: 'list@kernel.org', cc: 'reviewer@example.org', subject: '[PATCH v2] preserve formatting',
+    body, inReplyTo: '<root@example.org>', references: '<root@example.org>', sendKey: 'b4-relay-send-test-1'
+  };
+  assert.equal((await post('/api/send', { ...message, bcc: 'private@example.org' })).status, 400);
+  assert.equal((await post('/api/send', { ...message, draftId: 'gmail-draft' })).status, 400);
+  const sends = await Promise.all([post('/api/send', message), post('/api/send', message)]);
+  assert.deepEqual(sends.map(response => response.status), [200, 200]);
+  assert.equal(submissions.length, 1);
+  const headers = submissions[0].split('\n\n', 1)[0];
+  assert.match(headers, /^X-Developer-Signature: test$/m);
+  assert.match(headers, /^From: "Patch Author" <author@example\.org>$/m);
+  assert.match(headers, /^To: list@kernel\.org$/m);
+  assert.match(headers, /^Cc: reviewer@example\.org$/m);
+  assert.match(headers, /^In-Reply-To: <root@example\.org>$/m);
+  assert.match(headers, /^References: <root@example\.org>$/m);
+  assert.match(headers, /^Content-Type: text\/plain; charset=UTF-8$/m);
+  assert.doesNotMatch(submissions[0], /\r/);
+  assert.equal(submissions[0].slice(headers.length + 2), body);
+
+  const rejected = { ...message, subject: '[PATCH] rejected', sendKey: 'b4-relay-send-test-2' };
+  for (let i = 0; i < 2; i++) {
+    const response = await post('/api/send', rejected);
+    assert.equal(response.status, 502);
+    assert.match((await response.json()).error, /Destinations must include a recognized list/);
+  }
+  assert.equal(submissions.length, 2);
+  b4Relay.patatt += '-missing';
+  const unsigned = await post('/api/send', { ...message, sendKey: 'b4-relay-send-test-3' });
+  assert.equal(unsigned.status, 502);
+  assert.match((await unsigned.json()).error, /Could not sign with patatt/);
+  assert.equal(submissions.length, 2);
+});
+
 test('writes reject missing CSRF, foreign origin, cross-site requests and DNS rebinding hosts', async t => {
   const f = await fixture(t); await f.status();
   for (const headers of [{ 'X-CSRF-Token': '' }, { 'X-CSRF-Token': 'é'.repeat(43) }, { Origin: 'https://evil.example.org' }, { 'Sec-Fetch-Site': 'cross-site' }]) assert.equal((await f.request('/api/demo', { method: 'POST', body: {}, headers })).status, 403, JSON.stringify(headers));

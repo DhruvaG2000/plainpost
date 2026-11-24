@@ -1,6 +1,6 @@
 # Plainpost
 
-A standalone, keyboard-driven Gmail IMAP/SMTP client and public lore reader for Linux kernel mailing lists. The interface follows lore's compact, monospace layout: an ASCII reply tree, one selected message, full headers, and parent/previous/next navigation. The composer sends **only `text/plain; charset=UTF-8`**. Gmail uses a Mutt-style home config and app password by default; no Google Cloud project is needed. No build step or database service is required.
+A standalone, keyboard-driven public lore reader for Linux kernel mailing lists with Gmail IMAP/SMTP and optional b4 relay sending. The interface follows lore's compact, monospace layout: an ASCII reply tree, one selected message, full headers, and parent/previous/next navigation. The composer sends **only `text/plain; charset=UTF-8`**. Gmail uses a Mutt-style home config and app password by default; no Google Cloud project is needed. No build step or database service is required.
 
 ![Plainpost reading a real lore thread](docs/lore.jpg)
 
@@ -63,9 +63,26 @@ Plainpost downloads the complete thread's `t.mbox.gz` through its local server a
 
 Click a subject in the tree to select that message. Branches follow `In-Reply-To` and `References`, even when dates are out of order; absent ancestors are shown as missing parents. Switch between **nested** and **flat**, use the parent/prev/next links, or press `[` and `]`. Pasting a reply's URL selects that reply within its full thread. The local URL preserves the selected message on reload.
 
-Connect Gmail, select a message, and choose **Reply** or **Reply all** to send a plain-text response with its original threading headers. Lore IDs never become Gmail API thread IDs. Gmail uses the reply headers to associate the response; Gmail may create a conversation if the original message is absent from your mailbox. Original `.eml`, displayed patch/text, and thread mbox downloads are available. Archive attachments are retained in the original `.eml` rather than shown inline.
+Select a message and choose **Reply** or **Reply all** to compose a plain-text response with its original threading headers. Gmail can deliver these replies. A b4 relay can deliver them if its submission policy permits replies. Lore IDs never become Gmail API thread IDs. Gmail uses the reply headers to associate the response; Gmail may create a conversation if the original message is absent from your mailbox. Original `.eml`, displayed patch/text, and thread mbox downloads are available. Archive attachments are retained in the original `.eml` rather than shown inline.
 
 Imported threads are read-only public archives, independent of your Gmail mailbox. The server keeps at most three imported threads in a session-scoped memory cache for 30 minutes; refetch the link after a restart or an expired download. Imports require network access and are limited to 8 MiB downloaded, 24 MiB expanded, and 1,000 messages. If lore returns an error or an anti-bot page, Plainpost reports it instead of displaying that page as email.
+
+## Send through a b4 relay
+
+The relay can send signed patches without a Gmail login or SMTP credentials in Plainpost.
+
+1. Install b4 and patatt as the OS user running Plainpost. Configure Git's `user.name`, `user.email`, and the signing key in that user's Git configuration. Set `b4.send-endpoint-web` to your relay URL. Register the key with the relay using `b4 send --web-auth-new` and complete `b4 send --web-auth-verify` with the challenge sent to your email address. An existing authorization for the same relay, identity, and key also works. [b4 web submission setup](https://b4.docs.kernel.org/en/latest/contributor/send.html)
+2. Set the relay URL and verified From address in `.env`. If patatt is outside the server's `PATH`, set `PATATT_PATH` to its absolute executable path.
+
+   ```dotenv
+   B4_RELAY_URL=https://lkml.kernel.org/_b4_submit
+   B4_RELAY_FROM="Your Name <you@example.org>"
+   # PATATT_PATH=/absolute/path/to/patatt
+   ```
+
+3. Restart Plainpost and choose **settings → Use b4 relay**. Compose the patch, review the message, and confirm delivery. Public lore reading remains available and drafts are kept in the current browser tab.
+
+The relay provides outgoing delivery to To and Cc recipients. The standard kernel.org endpoint requires a patch and a recognized mailing-list recipient. Use a relay that accepts ordinary replies if you want to send discussion messages this way. Relay submissions may be archived publicly. [Upstream relay implementation](https://github.com/mricon/b4/blob/master/misc/send-receive.py)
 
 ## Connect your Gmail account
 
@@ -177,6 +194,7 @@ server/index.mjs    Loopback server and configuration
 server/app.mjs      HTTP routes, OAuth, sessions, and request protection
 server/gmail.mjs    Gmail API and token refresh
 server/imap.mjs     Gmail IMAP and plain RFC822 SMTP delivery
+server/b4-relay.mjs patatt signing and b4 web submission
 server/mail-config.mjs  Static Mutt-style home settings
 server/mail.mjs     Plain MIME construction and mailbox export
 server/lore.mjs     Bounded lore downloads and mbox/MIME decoding

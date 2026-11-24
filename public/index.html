@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="A plain-text, keyboard-driven local Gmail client for Linux kernel mailing lists.">
+  <meta name="description" content="A plain-text, keyboard-driven local mail client for Linux kernel mailing lists.">
   <title>Plainpost — kernel mail & archives</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
@@ -18,7 +18,7 @@
       <div class="account"><span id="avatar" hidden>@</span><strong id="account-name">Local mailbox</strong> <span id="account-email">Gmail ready</span> · localhost</div>
     </header>
     <nav id="folders" aria-label="Mailbox navigation"><button data-folder="inbox" class="active">inbox</button> | <button data-folder="starred">starred</button> | <button data-folder="sent">sent</button> | <button data-folder="drafts">drafts</button> | <button data-folder="all">all mail</button> | <button data-folder="trash">trash</button></nav>
-    <div class="list-navigation"><span>lists: </span><nav id="lists" aria-label="Mailing list filters"></nav><button id="add-list" aria-label="Add a mailing list">[+ add]</button></div>
+    <div class="list-navigation" id="list-navigation"><span>lists: </span><nav id="lists" aria-label="Mailing list filters"></nav><button id="add-list" aria-label="Add a mailing list">[+ add]</button></div>
     <div class="search-tools">
       <form id="lore-form"><label for="lore-url">lore thread:</label><input id="lore-url" type="url" required placeholder="https://lore.kernel.org/all/message-id/" aria-label="Lore thread URL"><button id="fetch-lore" type="submit">Fetch thread</button></form>
       <form id="search-form" role="search"><label for="search">Gmail search:</label><input id="search" aria-label="Search Gmail" placeholder="list:linux-kernel.vger.kernel.org" autocomplete="off"><button type="submit">Search</button><button type="button" id="clear-search" aria-label="Clear search" hidden>clear</button></form>
@@ -30,11 +30,11 @@
         <details class="thread-pane" id="mailbox-index" open>
           <summary>Mailbox thread index</summary>
           <div class="pane-toolbar"><span id="list-caption">CONVERSATIONS</span><button id="unread-filter" aria-pressed="false">Unread only</button></div>
-          <div id="thread-list" class="thread-list" role="list" aria-live="polite"><div class="list-empty">Paste a lore message URL above to read a full public thread, or connect Gmail.</div></div>
+          <div id="thread-list" class="thread-list" role="list" aria-live="polite"><div class="list-empty">Paste a lore message URL above to read a full public thread, or choose a mail connection.</div></div>
           <div class="pagination"><button id="previous-page" disabled>← Previous</button><span id="page-label">—</span><button id="next-page" disabled>Next →</button></div>
         </details>
         <section class="reader-pane" id="reader" aria-label="Message reader" tabindex="0">
-          <div class="welcome"><h2>Plain-text kernel mail</h2><p>Read a lore thread without an account. Connect Gmail to read your mailbox and send inline replies.</p><p>Thread trees follow In-Reply-To and References headers. Patches retain their tabs and spacing.</p><div class="welcome-actions"><button id="welcome-connect">Connect Gmail</button> | <button id="demo-button">Explore demo</button></div></div>
+          <div class="welcome"><h2>Plain-text kernel mail</h2><p>Read a lore thread without an account. Connect Gmail to read your mailbox or use b4 relay to send without Gmail.</p><p>Thread trees follow In-Reply-To and References headers. Patches retain their tabs and spacing.</p><div class="welcome-actions"><button id="welcome-connect">Connect Gmail</button> | <button id="demo-button">Explore demo</button></div></div>
         </section>
       </div>
       <footer class="statusbar"><span id="status-text">Ready</span><span><kbd>j</kbd>/<kbd>k</kbd> threads · <kbd>[</kbd>/<kbd>]</kbd> messages · <kbd>r</kbd> reply · <button id="footer-help">? shortcuts</button></span></footer>
@@ -42,8 +42,9 @@
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
   <dialog id="settings-dialog" class="settings-dialog">
-    <div class="dialog-heading"><div><div class="eyebrow">LOCAL CONNECTION</div><h2>Your mailbox, your machine.</h2></div><button data-close="settings-dialog" aria-label="Close settings">×</button></div>
+    <div class="dialog-heading"><div><div class="eyebrow">LOCAL CONNECTION</div><h2>Mail connections</h2></div><button data-close="settings-dialog" aria-label="Close settings">×</button></div>
     <p id="connection-description">Connect Gmail with IMAP and SMTP using a private home-directory config, just like Mutt.</p>
+    <div class="setup-block"><strong>b4 relay</strong><p>Send plain-text submissions through a verified relay identity. Read public threads with lore and keep drafts in this browser tab.</p><p id="b4-setup">Set B4_RELAY_URL and B4_RELAY_FROM in .env on the Plainpost host, then restart.</p><button id="b4-connect" class="secondary-button" disabled>Use b4 relay</button></div>
     <div class="setup-block"><strong>Gmail IMAP + SMTP setup</strong><ol><li>Enable <strong>2-Step Verification</strong> in your Google Account, then create an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">app password</a> named Plainpost. Use that 16-character password, not your normal Google password.</li><li>In the Linux terminal that runs Plainpost, run <code>npm run config:init</code>. Edit this private file:<code id="mail-config-path">~/.config/plainpost/mail.conf</code></li><li>Set <code>imap_user</code> to your Gmail address and <code>imap_pass</code> to the app password. Keep <code>smtp_pass = $imap_pass</code>. On Linux, protect it with <code>chmod 600 ~/.config/plainpost/mail.conf</code>.</li><li>Click <strong>Reload config &amp; connect</strong>. This checks both IMAP and SMTP login without sending mail. No server restart is needed.</li></ol><p>Existing static <code>~/.muttrc</code> and Mutt/NeoMutt home configs are also recognized when there is no Plainpost config. WSL uses your <strong>Linux home</strong>; a headless board uses the service user’s home.</p><p>Gmail IMAP is already enabled for personal accounts. If app passwords are unavailable, check your account policy: managed accounts, Advanced Protection, and some 2-Step Verification configurations restrict them. <a href="https://support.google.com/accounts/answer/185833" target="_blank" rel="noopener noreferrer">Google’s app-password help</a>.</p><p id="mail-config-error" role="status"></p></div>
     <p class="muted">Passwords stay in your private server-side config and are never returned to the browser. Disconnect ends local sessions; it leaves your config intact. Revoke the app password in Google Account to disable it.</p>
     <details class="setup-block"><summary>Optional: Google OAuth</summary><p>For accounts that cannot use app passwords, the existing OAuth option is still available. Enable Gmail API in Google Cloud, create a Web application OAuth client, register <code id="redirect-uri">http://localhost:4819/auth/callback</code>, and set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env. Restart after changing .env.</p><button id="oauth-connect" disabled>Sign in with Google</button></details>
@@ -54,7 +55,7 @@
   <dialog id="compose-dialog" class="compose-dialog">
     <form id="compose-form">
       <div class="composer-heading"><div><span class="tiny-led"></span><strong id="compose-title">New message</strong><span class="composer-format">text/plain</span></div><button id="close-compose" type="button" aria-label="Close composer">×</button></div>
-      <div class="compose-fields"><div class="from-field"><span>From</span><strong id="compose-from"></strong></div><label>To<input name="to" id="compose-to" required autocomplete="off" placeholder="linux-kernel@vger.kernel.org"></label><label>Cc<input name="cc" id="compose-cc" autocomplete="off" placeholder="maintainers, reviewers"></label><label>Bcc<input name="bcc" id="compose-bcc" autocomplete="off" placeholder="optional"></label><label>Subject<input name="subject" id="compose-subject" required placeholder="[PATCH v1] subsystem: describe your change"></label></div>
+      <div class="compose-fields"><div class="from-field"><span>From</span><strong id="compose-from"></strong></div><label>To<input name="to" id="compose-to" required autocomplete="off" placeholder="linux-kernel@vger.kernel.org"></label><label>Cc<input name="cc" id="compose-cc" autocomplete="off" placeholder="maintainers, reviewers"></label><label id="compose-bcc-field">Bcc<input name="bcc" id="compose-bcc" autocomplete="off" placeholder="optional"></label><label>Subject<input name="subject" id="compose-subject" required placeholder="[PATCH v1] subsystem: describe your change"></label></div>
       <div class="compose-tools"><label class="file-button">↥ Insert patch<input type="file" id="patch-file" accept=".patch,.diff,.txt,.eml,text/plain" hidden></label><button type="button" id="add-signoff">＋ Signed-off-by</button><span>UTF-8 · no wrapping · tabs preserved</span></div>
       <label class="sr-only" for="compose-body">Plain-text message body</label><textarea name="body" id="compose-body" wrap="off" spellcheck="false" required placeholder="Write a plain-text message or insert a patch…"></textarea>
       <div class="composer-bottom"><div><span id="compose-stats">0 lines · 0 bytes</span><span id="draft-status">Unsaved draft</span></div><div><button type="button" id="discard-draft" class="text-button">Discard</button><button type="button" id="save-draft" class="secondary-button">Save draft</button><button type="submit" id="review-send" class="primary-button">Review & send ↗</button></div></div>

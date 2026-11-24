@@ -43,18 +43,34 @@ function relativeDate(value) {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 function modal(id) { if (!$(id).open) $(id).showModal(); }
+function usingRelay() { return state.status.provider === 'b4'; }
 function requireConnection() { if (!state.status.connected) { modal('#settings-dialog'); return false; } return true; }
 
 async function refreshStatus() {
   state.status = await api('/api/status');
   const demo = state.status.provider === 'demo';
+  const relay = usingRelay();
+  for (const id of ['#folders', '#list-navigation', '#search-form', '#compose-bcc-field', '#save-draft']) $(id).hidden = relay;
+  $('#mailbox-index').hidden = relay || state.thread?.source === 'lore';
+  $('#compose-bcc').disabled = relay;
+  $('#b4-connect').disabled = !state.status.b4Relay || relay;
+  $('#b4-setup').hidden = state.status.b4Relay;
+  $('#welcome-connect')?.replaceChildren(state.status.b4Relay ? 'Connect' : 'Connect Gmail');
+  if (relay && state.thread?.source !== 'lore') {
+    $('#view-title').firstChild.textContent = 'b4 relay ';
+    $('#thread-count').textContent = '';
+    $('#breadcrumb-folder').textContent = 'b4 relay';
+    $('#view-eyebrow').textContent = 'OUTGOING MAIL';
+    renderReaderEmpty('Ready to compose.', 'Compose a submission or fetch a public lore thread.');
+  }
+  $('#refresh-button').hidden = relay && state.thread?.source !== 'lore';
   $('#workspace').classList.toggle('disconnected', !state.status.connected);
   $('#demo-banner').hidden = !demo;
   $('#compose-button').disabled = !state.status.connected;
   $('#disconnect-button').hidden = !state.status.connected;
-  $('#connect-button').textContent = ['gmail', 'imap'].includes(state.status.provider) ? 'Gmail connected ✓' : demo ? 'Demo · Connect Gmail' : 'Connect Gmail';
-  $('#account-name').textContent = demo ? 'Demo mailbox' : state.status.connected ? 'Gmail connected' : 'Local mailbox';
-  $('#account-email').textContent = state.status.email || (state.status.mail.configured ? 'Home configuration ready' : 'Gmail setup required');
+  $('#connect-button').textContent = ['gmail', 'imap'].includes(state.status.provider) ? 'Gmail connected ✓' : relay ? 'b4 relay connected' : state.status.b4Relay ? 'Connect' : demo ? 'Demo · Connect Gmail' : 'Connect Gmail';
+  $('#account-name').textContent = demo ? 'Demo mailbox' : relay ? 'b4 relay' : state.status.connected ? 'Gmail connected' : 'Local mailbox';
+  $('#account-email').textContent = state.status.email || (state.status.b4Relay ? 'b4 relay available' : state.status.mail.configured ? 'Home configuration ready' : 'Gmail setup required');
   $('#avatar').textContent = state.status.connected ? state.status.email[0].toUpperCase() : '@';
   $('#redirect-uri').textContent = `${state.status.appUrl}/auth/callback`;
   $('#mail-config-path').textContent = state.status.mail.path;
@@ -62,12 +78,12 @@ async function refreshStatus() {
   $('#settings-connect').textContent = 'Reload config & connect';
   $('#oauth-connect').disabled = !state.status.configured;
   $('#settings-demo').hidden = demo;
-  $('#connection-description').textContent = state.status.connected && !demo ? `Connected as ${state.status.email} via ${state.status.provider === 'imap' ? 'IMAP + SMTP' : 'OAuth'}.` : 'Connect like Mutt: Gmail IMAP for reading, SMTP for sending, and a private app password in your home directory. No Google Cloud project is needed.';
-  statusText(demo ? 'Demo ready · no external mail' : state.status.connected ? 'Gmail connected · ready' : state.status.mail.configured ? 'Ready to connect using home config' : 'Gmail setup required · public lore available');
+  $('#connection-description').textContent = relay ? 'Sending via b4 relay as ' + state.status.email + '.' : state.status.connected && !demo ? `Connected as ${state.status.email} via ${state.status.provider === 'imap' ? 'IMAP + SMTP' : 'OAuth'}.` : 'Connect like Mutt: Gmail IMAP for reading, SMTP for sending, and a private app password in your home directory. No Google Cloud project is needed.';
+  statusText(demo ? 'Demo ready · no external mail' : relay ? 'b4 relay · ready to compose' : state.status.connected ? 'Gmail connected · ready' : state.status.b4Relay ? 'b4 relay available · public lore available' : state.status.mail.configured ? 'Ready to connect using home config' : 'Gmail setup required · public lore available');
 }
 async function connect(reload = false) {
   await refreshStatus();
-  if (!reload && state.status.connected && state.status.provider !== 'demo') { modal('#settings-dialog'); return; }
+  if (!reload && (state.status.b4Relay || (state.status.connected && state.status.provider !== 'demo'))) { modal('#settings-dialog'); return; }
   if (!state.status.mail.configured) { modal('#settings-dialog'); return; }
   const button = $('#settings-connect'); button.disabled = true;
   statusText('Checking Gmail IMAP and SMTP login…');
@@ -77,6 +93,23 @@ async function connect(reload = false) {
     toast('Gmail connected using your home configuration.');
   } catch (error) { modal('#settings-dialog'); $('#mail-config-error').textContent = error.message; throw error; }
   finally { button.disabled = false; }
+}
+async function connectRelay() {
+  const button = $('#b4-connect');
+  button.disabled = true;
+  try {
+    await api('/api/connect/b4', { method: 'POST', body: '{}' });
+  } catch (error) { button.disabled = false; throw error; }
+  if (state.thread?.source !== 'lore') {
+    ++state.listVersion;
+    ++state.threadVersion;
+    state.thread = null;
+    state.selectedId = null;
+    state.loading = false;
+    history.replaceState(null, '', '/');
+  }
+  await refreshStatus();
+  $('#settings-dialog').close();
 }
 async function openDemo() {
   if (['gmail', 'imap'].includes(state.status.provider)) { toast('Disconnect your Gmail account before opening the isolated demo.'); return; }
@@ -103,7 +136,7 @@ function mailboxQuery() {
   return query + (state.unread ? ' is:unread' : '');
 }
 async function loadMailbox(reset = true) {
-  if (!requireConnection()) return;
+  if (usingRelay() || !requireConnection()) return;
   $('#mailbox-index').hidden = false;
   history.replaceState(null, '', '/');
   if (reset) { state.page = 0; state.pageTokens = ['']; }
@@ -188,11 +221,11 @@ async function importLore(url, preserveSelection = false) {
     state.thread = thread; state.selectedId = null;
     const hashId = preserveSelection ? new URLSearchParams(location.hash.slice(1)).get('message') : null;
     state.activeMessageId = (thread.messages.find(m => m.id === hashId) || thread.messages.find(m => m.messageId === thread.requestedMessageId) || thread.messages[0])?.id;
-    $('#workspace').classList.remove('disconnected'); $('#mailbox-index').hidden = true;
+    $('#workspace').classList.remove('disconnected'); $('#mailbox-index').hidden = true; $('#refresh-button').hidden = false;
     $('#lore-url').value = url; $('#view-title').firstChild.textContent = 'Lore archive '; $('#thread-count').textContent = `${thread.messages.length} messages`;
     $('#view-eyebrow').textContent = 'PUBLIC ARCHIVE'; $('#breadcrumb-folder').textContent = 'lore.kernel.org';
     history.replaceState(null, '', `/?lore=${encodeURIComponent(url)}#message=${encodeURIComponent(state.activeMessageId)}`);
-    renderReader(); statusText(`Lore · ${thread.messages.length} messages · public archive · reply using Gmail`);
+    renderReader(); statusText(`Lore · ${thread.messages.length} messages · public archive`);
   } finally { $('#fetch-lore').disabled = false; }
 }
 function renderReader(reveal = true) {
@@ -270,9 +303,10 @@ function composeBusy(busy) {
   state.composeBusy = busy;
   for (const selector of ['#save-draft', '#review-send', '#discard-draft', '#close-compose', '#confirm-send']) $(selector).disabled = busy;
   for (const element of document.querySelectorAll('#compose-form input, #compose-form textarea, .compose-tools button, #send-dialog [data-close]')) element.disabled = busy;
+  $('#compose-bcc').disabled = busy || usingRelay();
 }
 async function saveDraft() {
-  if (state.composeBusy) return;
+  if (state.composeBusy || usingRelay()) return;
   if (!$('#compose-form').reportValidity()) return;
   composeBusy(true);
   try {
@@ -289,12 +323,12 @@ function reviewSend(event) {
   const input = readComposer();
   state.sendKey ||= crypto.randomUUID();
   state.reviewedMessage = { ...input, sendKey: state.sendKey };
-  $('#send-title').textContent = state.status.provider === 'demo' ? 'Send to the demo mailbox?' : 'Ready to send?';
+  $('#send-title').textContent = state.status.provider === 'demo' ? 'Send to the demo mailbox?' : usingRelay() ? 'Send through b4 relay?' : 'Ready to send?';
   $('#send-details').innerHTML = ['to', 'cc', 'bcc', 'subject'].filter(key => input[key]).map(key => `<div class="send-detail"><span>${escape(key)}</span><strong>${escape(input[key])}</strong></div>`).join('');
   $('#send-preview').textContent = input.body;
   const patch = /^diff --git/m.test(input.body);
   const signoff = /^Signed-off-by:/m.test(input.body);
-  $('#send-note').textContent = state.status.provider === 'demo' ? 'This creates a sample message only. No mail leaves your machine.' : `${patch && !signoff ? 'This patch has no Signed-off-by trailer. Check the contribution requirements before sending. ' : ''}Sending as ${state.status.from || state.status.email}. Plain text, UTF-8, original spacing. ${input.inReplyTo ? 'Threading headers are included.' : ''}`;
+  $('#send-note').textContent = state.status.provider === 'demo' ? 'This creates a sample message only. No mail leaves your machine.' : `${patch && !signoff ? 'This patch has no Signed-off-by trailer. Check the contribution requirements before sending. ' : ''}Sending as ${state.status.from || state.status.email}. Plain text, UTF-8, original spacing. ${input.inReplyTo ? 'Threading headers are included.' : ''}` + (usingRelay() ? ' The relay may publish the message and apply its own submission rules.' : '');
   modal('#send-dialog');
 }
 async function sendMessage() {
@@ -303,13 +337,14 @@ async function sendMessage() {
   try {
     const result = await api('/api/send', { method: 'POST', body: JSON.stringify(state.reviewedMessage) });
     $('#send-dialog').close(); $('#compose-dialog').close(); sessionStorage.removeItem(draftStorageKey()); state.compose = null;
-    toast(result.warning || (state.status.provider === 'demo' ? 'Message sent inside the demo mailbox.' : 'Plain-text message sent through Gmail.'), !!result.warning);
-    await loadMailbox(false);
+    toast(result.warning || (state.status.provider === 'demo' ? 'Message sent inside the demo mailbox.' : usingRelay() ? 'Message accepted by the b4 relay.' : 'Plain-text message sent through Gmail.'), !!result.warning);
+    if (!usingRelay()) await loadMailbox(false);
   } finally { composeBusy(false); $('#confirm-send').textContent = 'Send message ↗'; }
 }
 
 for (const button of document.querySelectorAll('[data-close]')) on(button, 'click', () => $(`#${button.dataset.close}`).close());
 for (const id of ['#connect-button', '#welcome-connect', '#demo-connect']) on(id, 'click', () => connect());
+on('#b4-connect', 'click', connectRelay);
 on('#settings-connect', 'click', () => connect(true));
 on('#oauth-connect', 'click', () => window.location.assign('/auth/start'));
 for (const id of ['#demo-button', '#settings-demo']) on(id, 'click', openDemo);
@@ -363,7 +398,7 @@ on('#save-draft', 'click', saveDraft);
 on('#close-compose', 'click', () => { if (!state.composeBusy) { updateComposeStats(); $('#compose-dialog').close(); toast('Draft kept in this browser tab. Press c to resume.'); } });
 on('#compose-dialog', 'cancel', event => { if (state.composeBusy) event.preventDefault(); else updateComposeStats(); });
 on('#send-dialog', 'cancel', event => { if (state.composeBusy) event.preventDefault(); });
-on('#discard-draft', 'click', () => { if (state.composeBusy) return; sessionStorage.removeItem(draftStorageKey()); $('#compose-dialog').close(); state.compose = null; toast(state.status.provider === 'demo' ? 'Local draft discarded. Previously saved demo drafts stay in the demo mailbox.' : 'Local draft discarded. Previously saved Gmail drafts stay in Gmail.'); });
+on('#discard-draft', 'click', () => { if (state.composeBusy) return; sessionStorage.removeItem(draftStorageKey()); $('#compose-dialog').close(); state.compose = null; toast(state.status.provider === 'demo' ? 'Local draft discarded. Previously saved demo drafts stay in the demo mailbox.' : usingRelay() ? 'Local draft discarded.' : 'Local draft discarded. Previously saved Gmail drafts stay in Gmail.'); });
 on('#confirm-send', 'click', sendMessage);
 on('#compose-body', 'keydown', event => {
   if (event.key === 'Tab' && !event.shiftKey) { event.preventDefault(); const input = event.target; input.setRangeText('\t', input.selectionStart, input.selectionEnd, 'end'); updateComposeStats(); }
@@ -389,12 +424,12 @@ on('#patch-file', 'change', async event => {
 on(document, 'keydown', event => {
   if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.target.closest('input, textarea, select, [contenteditable=true]') || document.querySelector('dialog[open]')) return;
   if (event.key === '?') { event.preventDefault(); modal('#help-dialog'); return; }
-  if (event.key === '/') { event.preventDefault(); $('#search').focus(); return; }
+  if (event.key === '/' && !usingRelay()) { event.preventDefault(); $('#search').focus(); return; }
   if (event.key === 'c') { event.preventDefault(); openComposer(); return; }
   if (event.key === 'Escape') { $('#workspace').classList.remove('reader-open'); if (state.query) { state.query = ''; $('#search').value = ''; return loadMailbox(); } }
   if (['[', ']'].includes(event.key) && state.thread) { event.preventDefault(); const ordered = threadTree(state.thread.messages).filter(r => r.node.message).map(r => r.node.message); const index = ordered.findIndex(m => m.id === state.activeMessageId); showMessage(ordered[Math.max(0, Math.min(ordered.length - 1, index + (event.key === ']' ? 1 : -1)))].id); return; }
   if ((event.key === 'r' || event.key === 'R') && state.thread) { event.preventDefault(); reply(undefined, event.key === 'R'); return; }
-  if (!state.status.connected || state.loading || state.thread?.source === 'lore') return;
+  if (!state.status.connected || usingRelay() || state.loading || state.thread?.source === 'lore') return;
   if (['j', 'k', 'ArrowDown', 'ArrowUp'].includes(event.key)) {
     event.preventDefault(); const index = Math.max(0, state.threads.findIndex(t => t.id === state.selectedId)); const next = Math.min(state.threads.length - 1, Math.max(0, index + (['j', 'ArrowDown'].includes(event.key) ? 1 : -1))); return selectThread(state.threads[next]?.id);
   }
@@ -413,6 +448,6 @@ async function initialize() {
   }
   const lore = new URLSearchParams(location.search).get('lore');
   if (lore) await importLore(lore, true);
-  else if (state.status.connected) await loadMailbox();
+  else if (state.status.connected && !usingRelay()) await loadMailbox();
 }
 initialize().catch(error => toast(error.message, true));

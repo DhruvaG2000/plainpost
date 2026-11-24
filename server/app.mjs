@@ -9,6 +9,7 @@ import { DemoMailbox } from './demo.mjs';
 import { fetchLore } from './lore.mjs';
 import { loadMailConfig, publicMailConfig } from './mail-config.mjs';
 import { ImapMailbox } from './imap.mjs';
+import { sendViaB4Relay } from './b4-relay.mjs';
 
 const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -20,7 +21,7 @@ const safeId = value => { if (!/^[a-zA-Z0-9_-]{1,256}$/.test(value || '')) throw
 export async function createApp(config, vault, { fetcher = fetch, mailConfigLoader = loadMailConfig, imapFactory = settings => new ImapMailbox(settings) } = {}) {
   const flows = new Map(), demoMailboxes = new Map(), sends = new Map();
   const archives = new Map();
-  for (const [id, session] of Object.entries(vault.data.sessions)) if (session.expiresAt < Date.now() || !['gmail', 'imap'].includes(session.provider)) delete vault.data.sessions[id];
+  for (const [id, session] of Object.entries(vault.data.sessions)) if (session.expiresAt < Date.now() || !['gmail', 'imap', 'b4'].includes(session.provider)) delete vault.data.sessions[id];
 
   function setCookie(res, token) { res.setHeader('Set-Cookie', `plainpost_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`); }
   async function newSession(res, oldId, provider = 'anonymous', email = '') {
@@ -58,8 +59,11 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
       if (path === '/api/status' && req.method === 'GET') {
         if (!session) ({ id: sessionId, session } = await newSession(res));
         const mail = await mailConfigLoader();
-        const active = session.provider !== 'imap' || (mail.configured && mail.email === session.email);
-        return json(res, { connected: session.provider !== 'anonymous' && active, provider: active ? session.provider : 'anonymous', email: active ? session.email : '', from: session.provider === 'imap' && active ? mail.from : session.email, csrf: session.csrf, configured: !!(config.clientId && config.clientSecret), mail: publicMailConfig(mail), appUrl: config.appUrl });
+        let active = true;
+        if (session.provider === 'imap') active = mail.configured && mail.email === session.email;
+        if (session.provider === 'b4') active = config.b4Relay?.email === session.email;
+        const from = session.provider === 'b4' ? config.b4Relay?.from : session.provider === 'imap' ? mail.from : session.email;
+        return json(res, { connected: session.provider !== 'anonymous' && active, provider: active ? session.provider : 'anonymous', email: active ? session.email : '', from: active ? from : '', csrf: session.csrf, configured: !!(config.clientId && config.clientSecret), mail: publicMailConfig(mail), b4Relay: !!config.b4Relay, appUrl: config.appUrl });
       }
       if (path === '/api/connect/imap' && req.method === 'POST') {
         await body(req);
@@ -67,6 +71,18 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
         if (!mail.configured) throw new AppError(mail.error || 'Configure Gmail in your home directory first.');
         await imapFactory(mail).verify();
         await newSession(res, sessionId, 'imap', mail.email);
+        return json(res, { ok: true });
+      }
+      if (path === '/api/connect/b4' && req.method === 'POST') {
+        await body(req);
+        if (!config.b4Relay) throw new AppError('Configure the b4 relay on the Plainpost server first.');
+        const result = await newSession(res, sessionId, 'b4', config.b4Relay.email);
+        for (const [key, entry] of archives) {
+          if (key.startsWith(sessionId + ':')) {
+            archives.delete(key);
+            archives.set(result.id + key.slice(sessionId.length), entry);
+          }
+        }
         return json(res, { ok: true });
       }
       if (path.startsWith('/api/lore/')) {
@@ -126,12 +142,17 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
         } catch { return redirect(res, '/?auth_error=exchange_failed'); }
       }
       if (path.startsWith('/api/')) {
-        if (!session || session.provider === 'anonymous') throw new AppError('Connect Gmail or open the demo mailbox.', 401);
+        if (!session || session.provider === 'anonymous') throw new AppError('Connect Gmail or b4 relay, or open the demo mailbox.', 401);
         let mailbox;
         if (session.provider === 'imap') {
           const mail = await mailConfigLoader();
           if (!mail.configured || mail.email !== session.email) throw new AppError('Mail settings changed. Open settings and connect Gmail again.', 401);
           mailbox = imapFactory(mail);
+        } else if (session.provider === 'b4') {
+          const relay = config.b4Relay;
+          if (relay?.email !== session.email) throw new AppError('Relay settings changed. Connect b4 relay again.', 401);
+          if (path !== '/api/send' || req.method !== 'POST') throw new AppError('b4 relay provides outgoing delivery only.', 405);
+          mailbox = { from: relay.from, send: raw => sendViaB4Relay(relay, raw, fetcher) };
         } else mailbox = session.provider === 'demo' ? demoMailboxes.get(sessionId) : new Gmail(config, vault, session.email, fetcher);
         if (!mailbox) throw new AppError('Demo session expired. Open the demo again.', 401);
         if (path === '/api/labels' && req.method === 'GET') return json(res, { labels: await mailbox.labels() });
@@ -159,7 +180,11 @@ export async function createApp(config, vault, { fetcher = fetch, mailConfigLoad
         const draftMatch = path.match(/^\/api\/drafts\/([^/]+)$/);
         if (draftMatch && req.method === 'GET') return json(res, await mailbox.draft(safeId(draftMatch[1])));
         if ((path === '/api/send' || path === '/api/drafts') && req.method === 'POST') {
-          const input = await body(req), raw = buildRawMail(input, mailbox.from || session.email);
+          const input = await body(req);
+          if (session.provider === 'b4' && (input.bcc || input.draftId)) {
+            throw new AppError('b4 relay supports To and Cc and drafts kept in this browser tab.');
+          }
+          const raw = buildRawMail(input, mailbox.from || session.email);
           const threadId = input.inReplyTo && input.threadId ? safeId(input.threadId) : undefined;
           if (path === '/api/drafts') return json(res, await mailbox.saveDraft(raw, threadId, input.draftId ? safeId(input.draftId) : undefined));
           if (!/^[a-zA-Z0-9_-]{16,100}$/.test(input.sendKey || '')) throw new AppError('Missing send request key.');
