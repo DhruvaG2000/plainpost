@@ -13,7 +13,7 @@ const defaults = [
 ];
 let lists = defaults;
 try { const saved = JSON.parse(localStorage.getItem('plainpost-lists')); if (Array.isArray(saved) && saved.every(v => typeof v?.name === 'string' && typeof v?.address === 'string')) lists = saved; } catch { /* defaults */ }
-const state = { status: {}, folder: 'inbox', list: null, query: '', unread: false, threads: [], selectedId: null, thread: null, activeMessageId: null, flat: false, page: 0, pageTokens: [''], nextPage: '', loading: false, listVersion: 0, threadVersion: 0, compose: null, composeBusy: false, sendKey: null };
+const state = { status: {}, folder: 'inbox', list: null, query: '', unread: false, threads: [], selectedId: null, thread: null, activeMessageId: null, flat: false, page: 0, pageTokens: [''], nextPage: '', loading: false, listVersion: 0, threadVersion: 0, compose: null, composeBusy: false, sendKey: null, reviewedMessage: null };
 let toastTimer;
 
 function toast(message, error = false) {
@@ -284,10 +284,11 @@ async function saveDraft() {
   } finally { composeBusy(false); }
 }
 function reviewSend(event) {
-  event?.preventDefault(); if (state.composeBusy) return;
+  event?.preventDefault(); if (state.composeBusy || $('#send-dialog').open) return;
   if (!$('#compose-form').reportValidity()) return;
   const input = readComposer();
   state.sendKey ||= crypto.randomUUID();
+  state.reviewedMessage = { ...input, sendKey: state.sendKey };
   $('#send-title').textContent = state.status.provider === 'demo' ? 'Send to the demo mailbox?' : 'Ready to send?';
   $('#send-details').innerHTML = ['to', 'cc', 'bcc', 'subject'].filter(key => input[key]).map(key => `<div class="send-detail"><span>${escape(key)}</span><strong>${escape(input[key])}</strong></div>`).join('');
   $('#send-preview').textContent = input.body;
@@ -297,10 +298,10 @@ function reviewSend(event) {
   modal('#send-dialog');
 }
 async function sendMessage() {
-  if (state.composeBusy) return;
+  if (state.composeBusy || !$('#send-dialog').open || !state.reviewedMessage) return;
   composeBusy(true); $('#confirm-send').textContent = 'Sending…';
   try {
-    const result = await api('/api/send', { method: 'POST', body: JSON.stringify({ ...readComposer(), sendKey: state.sendKey }) });
+    const result = await api('/api/send', { method: 'POST', body: JSON.stringify(state.reviewedMessage) });
     $('#send-dialog').close(); $('#compose-dialog').close(); sessionStorage.removeItem(draftStorageKey()); state.compose = null;
     toast(result.warning || (state.status.provider === 'demo' ? 'Message sent inside the demo mailbox.' : 'Plain-text message sent through Gmail.'), !!result.warning);
     await loadMailbox(false);
